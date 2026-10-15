@@ -95,6 +95,12 @@ class CheckController extends Controller
 
     private function checkSettingsSave(Plugin $plugin): void
     {
+        $posted = new Settings();
+        $posted->setAttributes(['allowedSections' => "pages\nblogArticle"], false);
+        if (!$posted->validate() || $posted->allowedSections !== ['pages', 'blogArticle']) {
+            $this->failures[] = 'A newline-separated section list was not read as separate handles: ' . json_encode($posted->allowedSections) . ' ' . json_encode($posted->getErrors());
+        }
+
         $settings = $plugin->getSettings();
         $original = $settings->getAttributes();
         $settings->provider = 'anthropic';

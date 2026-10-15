@@ -34,21 +34,37 @@ class Settings extends Model
 
     public function beforeValidate(): bool
     {
-        if (is_string($this->allowedSections)) {
-            $this->allowedSections = array_values(array_filter(array_map(
-                'trim',
-                preg_split('/\R|,/', $this->allowedSections) ?: [],
-            )));
-        }
-
-        if ($this->allowedSections === null) {
-            $this->allowedSections = [];
-        }
-
+        $this->allowedSections = $this->sectionHandles($this->allowedSections);
         $this->maxOutputTokens = (int)$this->maxOutputTokens;
         $this->enabled = filter_var($this->enabled, FILTER_VALIDATE_BOOLEAN);
 
         return parent::beforeValidate();
+    }
+
+    /**
+     * The settings field posts one handle per line. Craft casts that text onto
+     * the array property before validation, splitting only on commas, so a new
+     * line has to be split again here.
+     *
+     * @return string[]
+     */
+    private function sectionHandles(mixed $value): array
+    {
+        if ($value === null || $value === '') {
+            return [];
+        }
+
+        $handles = [];
+        foreach (is_array($value) ? $value : [$value] as $item) {
+            foreach (preg_split('/\R|,/', (string)$item) ?: [] as $handle) {
+                $handle = trim($handle);
+                if ($handle !== '') {
+                    $handles[] = $handle;
+                }
+            }
+        }
+
+        return array_values(array_unique($handles));
     }
 
     public function afterValidate(): void

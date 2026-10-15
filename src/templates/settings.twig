@@ -44,6 +44,7 @@
     label: "Sections the assistant may create",
     name: "allowedSections",
     value: settings.allowedSectionsText(),
+    errors: settings.getErrors('allowedSections'),
     rows: 5,
     instructions: "One section handle per line. Leave this empty to refuse page creation. Editing an existing Content Designer entry is still allowed."
 }) }}
