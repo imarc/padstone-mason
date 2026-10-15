@@ -1,22 +1,27 @@
-# Padstone Mason
-
-**Wildly Experimental**
+# Padstone Mason (Wildly Experimental)
 
 Control-panel chat for entries that use the Content Designer field (`contentDesigner`). It can also edit the other fields on that entry’s layout, including the hero. Edits go to a named draft called **Mason**. A second chat on the same entry gets the next numbered draft, such as **Mason 2**. Nothing goes live until someone publishes that draft.
 
 ## Setup
 
-1. Require `imarc/craft-padstone-mason` and install the plugin (`padstone-mason`).
-2. Put a key in the environment. It is read at request time and is not stored in settings, the database, or project config.
+1. Require it from the private repo [imarc/padstone-mason](https://github.com/imarc/padstone-mason). Composer needs access to that repo. There is no tagged release yet, so require the `main` branch.
+
+   ```
+   composer config repositories.padstone-mason vcs https://github.com/imarc/padstone-mason.git
+   composer require imarc/craft-padstone-mason:dev-main
+   ```
+
+2. Install the plugin (`padstone-mason`).
+3. Put a key in the environment. It is read at request time and is not stored in settings, the database, or project config.
 
    ```
    OPENAI_API_KEY=
    ANTHROPIC_API_KEY=
    ```
 
-3. In **Settings → Plugins → Padstone Mason**, choose the provider and model. Defaults are OpenAI and `gpt-4.1`. For Anthropic, set the model as well (for example `claude-sonnet-4-5`).
-4. List the section handles the assistant may create. The default is `pages`. An empty list blocks new pages and still allows edits to an existing entry.
-5. Grant **Padstone Mason → Use Ask Mason**. Admins already have it. Settings and the usage report stay admin-only.
+4. In **Settings → Plugins → Padstone Mason**, choose the provider and model. Defaults are OpenAI and `gpt-4.1`. For Anthropic, set the model as well (for example `claude-sonnet-4-5`).
+5. List the section handles the assistant may create. The default is `pages`. An empty list blocks new pages and still allows edits to an existing entry.
+6. Grant **Padstone Mason → Use Ask Mason**. Admins already have it. Settings and the usage report stay admin-only.
 
 Turn **Enabled** off to hide the assistant. The settings screen stays available.
 
