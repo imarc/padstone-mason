@@ -10,7 +10,6 @@ use craft\elements\Entry;
 use craft\events\DefineHtmlEvent;
 use craft\events\RegisterUrlRulesEvent;
 use craft\events\RegisterUserPermissionsEvent;
-use craft\fields\Matrix;
 use craft\helpers\App;
 use craft\services\UserPermissions;
 use craft\web\UrlManager;
@@ -19,7 +18,6 @@ use imarc\padstonemason\models\Settings;
 use imarc\padstonemason\services\Assistant;
 use imarc\padstonemason\services\ContentDesigner;
 use imarc\padstonemason\services\Conversations;
-use imarc\padstonemason\services\FieldSupport;
 use imarc\padstonemason\services\Usage;
 use imarc\padstonemason\web\assets\assistant\AssistantAsset;
 use yii\base\Event;
@@ -132,7 +130,8 @@ class Plugin extends BasePlugin
 
     public function editorButtonHtml(Entry $entry): string
     {
-        if (!$this->isAvailableToCurrentUser() || !$entry->id || !$this->hasContentDesigner($entry)) {
+        $user = Craft::$app->getUser()->getIdentity();
+        if (!$this->isAvailableToCurrentUser() || !$entry->id || !$user || !Craft::$app->getElements()->canSave($entry, $user)) {
             return '';
         }
 
@@ -153,13 +152,6 @@ class Plugin extends BasePlugin
         $user = Craft::$app->getUser()->getIdentity();
 
         return $user && $user->can(self::PERMISSION);
-    }
-
-    public function hasContentDesigner(Entry $entry): bool
-    {
-        $field = $entry->getFieldLayout()?->getFieldByHandle(FieldSupport::CONTENT_DESIGNER);
-
-        return $field instanceof Matrix;
     }
 
     public function apiKey(): ?string

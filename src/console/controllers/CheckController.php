@@ -288,14 +288,26 @@ class CheckController extends Controller
             $this->failures[] = 'subBlocks min/max was not 2.';
         }
 
-        $refused = $plugin->contentDesigner->createPage([
-            'title' => 'Assistant check news page',
-            'section' => 'pages',
-            'entryType' => 'newsPage',
-        ], $admin);
-        if (!empty($refused['ok'])) {
-            $this->failures[] = 'Created a page whose entry type has no Content Designer field.';
-            $this->elementIds[] = (int)$refused['entryId'];
+        $named = $plugin->contentDesigner->describeSchema('Basic Page', $admin);
+        if (empty($named['ok']) || ($named['entryType'] ?? '') !== 'basicPage') {
+            $this->failures[] = 'The entry type name Basic Page did not resolve to basicPage.';
+        }
+
+        $newsSchema = $plugin->contentDesigner->describeSchema('newsPage', $admin);
+        $newsHandles = array_column($newsSchema['layoutFields'] ?? [], 'handle');
+        if (empty($newsSchema['ok']) || !in_array('hero', $newsHandles, true)) {
+            $this->failures[] = 'A layout without Content Designer did not describe its other fields.';
+        }
+
+        $unresolvedSchema = $plugin->contentDesigner->describeSchema('page', $admin);
+        $catalogHandles = [];
+        foreach ($unresolvedSchema['sections'] ?? [] as $section) {
+            foreach ($section['entryTypes'] ?? [] as $type) {
+                $catalogHandles[] = $type['handle'] ?? '';
+            }
+        }
+        if (!empty($unresolvedSchema['ok']) || !str_contains((string)($unresolvedSchema['error'] ?? ''), 'Ask the admin') || !in_array('basicPage', $catalogHandles, true) || in_array('page', $catalogHandles, true)) {
+            $this->failures[] = 'An unknown entry type did not return the section catalog.';
         }
 
         $plugin->getSettings()->allowedSections = [];
@@ -310,24 +322,111 @@ class CheckController extends Controller
         }
         $plugin->getSettings()->allowedSections = ['pages'];
 
-        $aliasedSchema = $plugin->contentDesigner->describeSchema('page', $admin);
-        if (empty($aliasedSchema['ok']) || ($aliasedSchema['entryType'] ?? '') !== 'basicPage') {
-            $this->failures[] = 'The page alias did not resolve to basicPage.';
-        }
-        $aliased = $plugin->contentDesigner->createPage([
+        $pageRequest = $plugin->contentDesigner->createPage([
             'title' => 'Assistant check page alias',
             'section' => 'pages',
             'entryType' => 'page',
             'slug' => 'assistant-check-alias-' . uniqid(),
         ], $admin);
-        if (empty($aliased['ok'])) {
-            $this->failures[] = 'Could not create a page from the page alias: ' . ($aliased['error'] ?? '');
-        } else {
-            $this->elementIds[] = (int)$aliased['entryId'];
-            $aliasDraft = $plugin->contentDesigner->entryFromId((int)$aliased['entryId'], (int)$aliased['draftId'], null, $admin);
-            if (!$aliasDraft || $aliasDraft->getType()->handle !== 'basicPage') {
-                $this->failures[] = 'A page alias draft was not a basicPage.';
+        $pageTypes = [];
+        foreach ($pageRequest['sections'] ?? [] as $section) {
+            if (($section['handle'] ?? '') === 'pages') {
+                foreach ($section['entryTypes'] ?? [] as $type) {
+                    $pageTypes[] = $type['handle'] ?? '';
+                }
             }
+        }
+        if (!empty($pageRequest['ok']) || !str_contains((string)($pageRequest['error'] ?? ''), 'Ask the admin') || !in_array('basicPage', $pageTypes, true)) {
+            $this->failures[] = 'Requesting entry type page created a draft or omitted the pages catalog.';
+            if (!empty($pageRequest['entryId'])) {
+                $this->elementIds[] = (int)$pageRequest['entryId'];
+            }
+        }
+
+        $namedDraft = $plugin->contentDesigner->createPage([
+            'title' => 'Assistant check named page',
+            'section' => 'pages',
+            'entryType' => 'Basic Page',
+            'slug' => 'assistant-check-named-' . uniqid(),
+        ], $admin);
+        if (empty($namedDraft['ok'])) {
+            $this->failures[] = 'Could not create a page from the entry type name Basic Page: ' . ($namedDraft['error'] ?? '');
+        } else {
+            $this->elementIds[] = (int)$namedDraft['entryId'];
+            $namedEntry = $plugin->contentDesigner->entryFromId((int)$namedDraft['entryId'], (int)$namedDraft['draftId'], null, $admin);
+            if (!$namedEntry || $namedEntry->getType()->handle !== 'basicPage') {
+                $this->failures[] = 'The name Basic Page did not create a basicPage draft.';
+            }
+        }
+
+        $news = $plugin->contentDesigner->createPage([
+            'title' => 'Assistant check news page',
+            'section' => 'pages',
+            'entryType' => 'newsPage',
+            'slug' => 'assistant-check-news-' . uniqid(),
+        ], $admin);
+        if (empty($news['ok'])) {
+            $this->failures[] = 'Could not create a page whose entry type has no Content Designer field: ' . ($news['error'] ?? '');
+        } else {
+            $this->elementIds[] = (int)$news['entryId'];
+            $newsDraft = $plugin->contentDesigner->entryFromId((int)$news['entryId'], (int)$news['draftId'], null, $admin);
+            if (!$newsDraft || $newsDraft->getType()->handle !== 'newsPage') {
+                $this->failures[] = 'The news page draft was not a newsPage.';
+            } else {
+                $newsLayout = $plugin->contentDesigner->readLayout($newsDraft, $admin);
+                if (empty($newsLayout['ok']) || !array_key_exists('hero', $newsLayout['matrices'] ?? []) || ($newsLayout['blocks'] ?? null) !== []) {
+                    $this->failures[] = 'Reading a layout without Content Designer did not return its other fields.';
+                }
+                if (!str_contains($plugin->editorButtonHtml($newsDraft), '>Ask Mason</button>')) {
+                    $this->failures[] = 'Ask Mason was not offered on an entry without Content Designer.';
+                }
+                $missingField = $plugin->contentDesigner->addBlock($newsDraft, 'contentDesigner', 'richText', null, [], [], $admin);
+                if (!empty($missingField['ok']) || !str_contains((string)($missingField['error'] ?? ''), 'hero')) {
+                    $this->failures[] = 'A missing Content Designer field did not name the Matrix fields on the layout.';
+                }
+                $viewer = $this->viewer($admin);
+                $this->withPermissionChecks(function () use ($plugin, $newsDraft, $viewer): void {
+                    if (in_array((int)$viewer->id, $this->userIds, true)) {
+                        $pages = Craft::$app->getEntries()->getSectionByHandle('pages');
+                        Craft::$app->getUserPermissions()->saveUserPermissions($viewer->id, [
+                            Plugin::PERMISSION,
+                            "viewEntries:{$pages->uid}",
+                            "viewPeerEntries:{$pages->uid}",
+                            "viewPeerEntryDrafts:{$pages->uid}",
+                        ]);
+                    }
+                    Craft::$app->getUser()->setIdentity($viewer);
+                    $deniedCreate = $plugin->contentDesigner->createPage([
+                        'title' => 'Assistant check denied create',
+                        'section' => 'pages',
+                        'entryType' => 'basicPage',
+                    ], $viewer);
+                    if (!empty($deniedCreate['ok'])) {
+                        $this->failures[] = 'A view-only user created a page.';
+                        $this->elementIds[] = (int)$deniedCreate['entryId'];
+                    }
+                    if ($plugin->editorButtonHtml($newsDraft) !== '') {
+                        $this->failures[] = 'Ask Mason was offered to a user who cannot save the entry.';
+                    }
+                });
+                Craft::$app->getUser()->setIdentity($admin);
+            }
+        }
+
+        $prompt = (new ReflectionMethod($plugin->assistant, 'systemPrompt'))->invoke(
+            $plugin->assistant,
+            new ConversationRecord(),
+            $admin,
+        );
+        if (
+            !is_string($prompt)
+            ||             !str_contains($prompt, 'ask the admin which to use')
+            || !str_contains($prompt, 'Do not say the request is impossible or a project config change')
+            || !str_contains($prompt, 'basicPage (Basic Page)')
+            || str_contains($prompt, 'There is no entry type named page')
+            || !str_contains($prompt, 'rebind_entry')
+        ) {
+            $this->failures[] = 'The instructions do not list the allowed entry types or still alias page to basicPage.';
         }
 
         $created = $plugin->contentDesigner->createPage([
@@ -541,6 +640,120 @@ class CheckController extends Controller
         if (empty($published['ok']) || !Entry::find()->id($draft->getCanonicalId())->one()) {
             $this->failures[] = 'Publishing did not make the entry live: ' . ($published['error'] ?? '');
         }
+
+        $keptPage = $plugin->contentDesigner->createPage([
+            'title' => 'Assistant check stay bound',
+            'section' => 'pages',
+            'entryType' => 'basicPage',
+            'slug' => 'assistant-check-stay-bound-' . uniqid(),
+        ], $admin);
+        if (empty($keptPage['ok'])) {
+            $this->failures[] = 'Could not create a page to check the publish binding: ' . ($keptPage['error'] ?? '');
+
+            return;
+        }
+        $canonicalId = (int)$keptPage['entryId'];
+        $this->elementIds[] = $canonicalId;
+        $kept = $plugin->conversations->open($admin->id, $canonicalId, (int)$keptPage['draftId'], Craft::$app->getSites()->getPrimarySite()->id);
+        $this->conversationIds[] = (int)$kept->id;
+        $oldDraftId = (int)$kept->draftId;
+        $publishedKeep = $plugin->assistant->publish($kept, $admin);
+        if (empty($publishedKeep['ok']) || (int)$kept->entryId !== $canonicalId || $kept->draftId) {
+            $this->failures[] = 'Publishing cleared the conversation entry binding.';
+        } else {
+            $found = $plugin->contentDesigner->entryFromId($canonicalId, $oldDraftId, $kept->siteId ? (int)$kept->siteId : null, $admin);
+            if (!$found || $found->getIsDraft()) {
+                $this->failures[] = 'A published entry could not be loaded from its old draft id.';
+            }
+            $continued = $plugin->assistant->reply($kept, 'Rename it', $admin, new ScriptedClient(function(array $messages) {
+                $tools = array_values(array_filter($messages, fn(array $message) => $message['role'] === 'tool'));
+                if ($tools === []) {
+                    return new ProviderResult(toolCalls: [[
+                        'id' => 'rename-1',
+                        'name' => 'update_entry',
+                        'arguments' => ['title' => 'Assistant check stayed bound'],
+                    ]]);
+                }
+
+                return new ProviderResult(text: 'Renamed the draft.');
+            }));
+            $kept->refresh();
+            $live = Entry::find()->id($canonicalId)->status(null)->one();
+            if (empty($continued['ok']) || !$kept->draftId || (int)$kept->entryId !== $canonicalId || !$live || $live->title === 'Assistant check stayed bound') {
+                $this->failures[] = 'A later edit did not stay bound to the published entry.';
+            }
+        }
+
+        $rebindPage = $plugin->contentDesigner->createPage([
+            'title' => 'Assistant check rebind',
+            'section' => 'pages',
+            'entryType' => 'basicPage',
+            'slug' => 'assistant-check-rebind-' . uniqid(),
+        ], $admin);
+        if (empty($rebindPage['ok'])) {
+            $this->failures[] = 'Could not create a page to rebind: ' . ($rebindPage['error'] ?? '');
+
+            return;
+        }
+        $this->elementIds[] = (int)$rebindPage['entryId'];
+        $rebindDraft = $plugin->contentDesigner->entryFromId((int)$rebindPage['entryId'], (int)$rebindPage['draftId'], null, $admin);
+        $rebindPublished = $rebindDraft ? $plugin->contentDesigner->publishDraft($rebindDraft, $admin) : ['ok' => false];
+        $started = $plugin->conversations->start($admin->id, null, $admin, Craft::$app->getSites()->getPrimarySite()->id);
+        $chat = $started['conversation'] ?? null;
+        if (empty($rebindPublished['ok']) || !$chat instanceof ConversationRecord) {
+            $this->failures[] = 'Could not prepare an unbound conversation for rebind.';
+
+            return;
+        }
+        $this->conversationIds[] = (int)$chat->id;
+        $liveId = (int)$rebindPage['entryId'];
+        $rebound = $plugin->assistant->execute('rebind_entry', ['entryId' => $liveId], $chat, $admin);
+        $chat->refresh();
+        $live = Entry::find()->id($liveId)->status(null)->one();
+        if (empty($rebound['ok']) || (int)$chat->entryId !== $liveId || !$chat->draftId || !$live || $live->getIsDraft() || $live->title !== 'Assistant check rebind') {
+            $this->failures[] = 'Rebinding did not attach the conversation to the existing entry.';
+        } else {
+            $firstDraftId = (int)$chat->draftId;
+            $again = $plugin->assistant->execute('rebind_entry', ['entryId' => $liveId], $chat, $admin);
+            $chat->refresh();
+            if (empty($again['ok']) || (int)$chat->draftId !== $firstDraftId) {
+                $this->failures[] = 'Rebinding the same entry created another draft.';
+            }
+
+            $otherPage = $plugin->contentDesigner->createPage([
+                'title' => 'Assistant check rebind other',
+                'section' => 'pages',
+                'entryType' => 'basicPage',
+                'slug' => 'assistant-check-rebind-other-' . uniqid(),
+            ], $admin);
+            if (!empty($otherPage['entryId'])) {
+                $this->elementIds[] = (int)$otherPage['entryId'];
+            }
+            $otherDraft = empty($otherPage['ok']) ? null : $plugin->contentDesigner->entryFromId((int)$otherPage['entryId'], (int)$otherPage['draftId'], null, $admin);
+            $otherPublished = $otherDraft ? $plugin->contentDesigner->publishDraft($otherDraft, $admin) : ['ok' => false];
+            $switched = empty($otherPublished['ok']) ? ['ok' => false] : $plugin->assistant->execute('rebind_entry', ['entryId' => (int)$otherPage['entryId']], $chat, $admin);
+            $chat->refresh();
+            $previousDraft = Entry::find()->draftId($firstDraftId)->status(null)->exists();
+            if (empty($switched['ok']) || (int)$chat->entryId !== (int)$otherPage['entryId'] || (int)$chat->draftId === $firstDraftId || !$previousDraft) {
+                $this->failures[] = 'Rebinding did not move the conversation to the other entry.';
+            }
+        }
+
+        $missing = $plugin->assistant->execute('rebind_entry', ['entryId' => 2147483646], $chat, $admin);
+        if (!empty($missing['ok'])) {
+            $this->failures[] = 'Rebinding accepted an entry that does not exist.';
+        }
+        $this->withPermissionChecks(function () use ($plugin, $chat, $viewer, $liveId): void {
+            if (!in_array((int)$viewer->id, $this->userIds, true)) {
+                return;
+            }
+            Craft::$app->getUser()->setIdentity($viewer);
+            $denied = $plugin->assistant->execute('rebind_entry', ['entryId' => $liveId], $chat, $viewer);
+            if (!empty($denied['ok'])) {
+                $this->failures[] = 'A view-only user rebound a conversation.';
+            }
+        });
+        Craft::$app->getUser()->setIdentity($admin);
     }
 
     private function checkAssistantLoop(Plugin $plugin, User $admin): void

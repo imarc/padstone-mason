@@ -37,13 +37,12 @@ class ChatController extends Controller
     {
         $this->requireUse();
         $entry = $this->entryFromRequest();
-        if (!Plugin::getInstance()->hasContentDesigner($entry)) {
-            throw new BadRequestHttpException('This entry has no Content Designer field.');
-        }
-
         $user = Craft::$app->getUser()->getIdentity();
         if (!Craft::$app->getElements()->canView($entry, $user)) {
             throw new ForbiddenHttpException('You do not have permission to view that entry.');
+        }
+        if (!Craft::$app->getElements()->canSave($entry, $user)) {
+            throw new ForbiddenHttpException('You do not have permission to save that entry.');
         }
 
         $entryId = $entry->getCanonicalId();
@@ -247,8 +246,8 @@ class ChatController extends Controller
     {
         if ((string)$this->request->getBodyParam('scope') === 'entry') {
             $entry = $this->entryFromRequest();
-            if (!Plugin::getInstance()->hasContentDesigner($entry)) {
-                return ['ok' => false, 'error' => 'This entry has no Content Designer field.'];
+            if (!Craft::$app->getElements()->canSave($entry, $user)) {
+                return ['ok' => false, 'error' => 'You do not have permission to save that entry.'];
             }
 
             return Plugin::getInstance()->conversations->start($user->id, $entry, $user, (int)$entry->siteId);

@@ -21,27 +21,26 @@ use Throwable;
 
 class ContentDesigner extends Component
 {
+    public const UNRESOLVED_MESSAGE = 'Ask the admin which section and entry type to use, and include these sections and entry types in the question. Do not say the request is impossible or a project config change.';
+
     public function describeSchema(?string $entryTypeHandle, ?User $user): array
     {
         if (!$user) {
             return $this->fail('You need to be signed in.');
         }
 
-        $entryType = $this->entryType($entryTypeHandle);
+        $entryType = $this->entryTypeByName($entryTypeHandle);
         if (!$entryType) {
-            return $this->fail('That entry type was not found.');
+            return $this->unresolved();
         }
 
         $field = $this->contentDesignerField($entryType);
-        if (!$field) {
-            return $this->fail('That entry type does not include Content Designer.');
-        }
 
         return [
             'ok' => true,
             'entryType' => $entryType->handle,
-            'field' => $field->handle,
-            'blockTypes' => $this->describeMatrix($field),
+            'field' => $field?->handle,
+            'blockTypes' => $field ? $this->describeMatrix($field) : [],
             'layoutFields' => $this->describeFields($entryType),
         ];
     }
@@ -50,11 +49,6 @@ class ContentDesigner extends Component
     {
         if (!$user || !Craft::$app->getElements()->canView($entry, $user)) {
             return $this->fail('You do not have permission to view that entry.');
-        }
-
-        $field = $this->matrixOn($entry, FieldSupport::CONTENT_DESIGNER);
-        if (!$field) {
-            return $this->fail('That entry does not include Content Designer.');
         }
 
         [$fields, $matrices] = $this->readEntryLayout($entry);
@@ -77,26 +71,13 @@ class ContentDesigner extends Component
             return $this->fail('You need to be signed in.');
         }
 
-        $sectionHandle = (string)($input['section'] ?? '');
-        /** @var \imarc\padstonemason\models\Settings $settings */
-        $settings = Plugin::getInstance()->getSettings();
-        if (!$settings->sectionIsAllowed($sectionHandle)) {
-            return $this->fail('That section is not allowed.');
+        $section = $this->matchingAllowedSection((string)($input['section'] ?? ''));
+        $matches = $section ? $this->matchingEntryTypes($section, (string)($input['entryType'] ?? '')) : [];
+        if (!$section || count($matches) !== 1) {
+            return $this->unresolved();
         }
 
-        $section = Craft::$app->getEntries()->getSectionByHandle($sectionHandle);
-        if (!$section) {
-            return $this->fail('That section was not found.');
-        }
-
-        $entryType = $this->entryTypeForSection($section, (string)($input['entryType'] ?? ''));
-        if (!$entryType) {
-            return $this->fail('That entry type is not available in the section.');
-        }
-
-        if (!$this->contentDesignerField($entryType)) {
-            return $this->fail('That entry type does not include Content Designer.');
-        }
+        $entryType = $matches[0];
 
         $siteId = (int)($input['siteId'] ?? Craft::$app->getSites()->getPrimarySite()->id);
         $entry = new Entry();
@@ -261,7 +242,9 @@ class ContentDesigner extends Component
 
         $field = $this->matrixOn($owner, $fieldHandle);
         if (!$field) {
-            return $this->fail('That Matrix field is not on the owner.');
+            $handles = $this->matrixHandles($owner);
+
+            return $this->fail('That Matrix field is not on the owner. Matrix fields on this layout: ' . ($handles === [] ? 'none' : implode(', ', $handles)) . '.');
         }
 
         $type = $this->typeOnField($field, $typeHandle);
@@ -592,11 +575,16 @@ class ContentDesigner extends Component
         $results = [];
         foreach ($query->all() as $element) {
             if (Craft::$app->getElements()->canView($element, $user)) {
-                $results[] = [
+                $row = [
                     'id' => $element->id,
                     'title' => (string)$element->title,
                     'kind' => $kind === 'asset' ? 'asset' : 'entry',
                 ];
+                if ($element instanceof Entry) {
+                    $row['section'] = $element->getSection()?->handle;
+                    $row['entryType'] = $element->getType()->handle;
+                }
+                $results[] = $row;
             }
         }
 
@@ -609,14 +597,15 @@ class ContentDesigner extends Component
             return null;
         }
 
-        $query = Entry::find()->status(null)->siteId($siteId);
+        $entry = null;
         if ($draftId) {
-            $query->draftId($draftId);
-        } else {
-            $query->id($id)->drafts(null);
+            $found = Entry::find()->status(null)->siteId($siteId)->draftId($draftId)->one();
+            $entry = $found instanceof Entry ? $found : null;
         }
-
-        $entry = $query->one();
+        if (!$entry && $id) {
+            $found = Entry::find()->status(null)->siteId($siteId)->id($id)->drafts(null)->one();
+            $entry = $found instanceof Entry ? $found : null;
+        }
 
         return $entry instanceof Entry && $user && Craft::$app->getElements()->canView($entry, $user) ? $entry : null;
     }
@@ -1039,36 +1028,135 @@ class ContentDesigner extends Component
         return null;
     }
 
-    private function entryType(?string $handle): ?EntryType
+    /**
+     * @return array<int, array{handle: string, name: string, entryTypes: array<int, array{handle: string, name: string}>}>
+     */
+    public function sectionCatalog(): array
     {
-        $handle = $this->aliasedEntryTypeHandle($handle);
-        if ($handle === '') {
+        $catalog = [];
+        foreach (Plugin::getInstance()->getSettings()->allowedSections as $handle) {
+            $section = $this->sectionByHandle((string)$handle);
+            if (!$section) {
+                continue;
+            }
+            $types = [];
+            foreach ($section->getEntryTypes() as $entryType) {
+                $types[] = ['handle' => $entryType->handle, 'name' => $entryType->name];
+            }
+            $catalog[] = [
+                'handle' => $section->handle,
+                'name' => $section->name,
+                'entryTypes' => $types,
+            ];
+        }
+
+        return $catalog;
+    }
+
+    public function sectionCatalogText(): string
+    {
+        $lines = [];
+        foreach ($this->sectionCatalog() as $section) {
+            $types = array_map(
+                fn(array $type) => $type['handle'] . ' (' . $type['name'] . ')',
+                $section['entryTypes'],
+            );
+            $lines[] = $section['handle'] . ' (' . $section['name'] . '): ' . implode(', ', $types);
+        }
+
+        return $lines === [] ? 'none' : implode("\n", $lines);
+    }
+
+    private function unresolved(): array
+    {
+        return $this->fail(self::UNRESOLVED_MESSAGE) + ['sections' => $this->sectionCatalog()];
+    }
+
+    private function entryTypeByName(?string $requested): ?EntryType
+    {
+        $needle = $this->normalize((string)$requested);
+        if ($needle === '') {
             return null;
         }
 
-        return Craft::$app->getEntries()->getEntryTypeByHandle($handle);
+        $matches = [];
+        foreach (Craft::$app->getEntries()->getAllEntryTypes() as $entryType) {
+            if ($this->normalize($entryType->handle) === $needle || $this->normalize($entryType->name) === $needle) {
+                $matches[$entryType->id] = $entryType;
+            }
+        }
+
+        return count($matches) === 1 ? array_values($matches)[0] : null;
     }
 
-    private function entryTypeForSection(Section $section, string $handle): ?EntryType
+    private function matchingAllowedSection(string $requested): ?Section
     {
-        $handle = $this->aliasedEntryTypeHandle($handle);
+        $needle = $this->normalize($requested);
+        if ($needle === '') {
+            return null;
+        }
+
+        $matches = [];
+        foreach (Plugin::getInstance()->getSettings()->allowedSections as $handle) {
+            $section = $this->sectionByHandle((string)$handle);
+            if ($section && $this->normalize($section->handle) === $needle) {
+                $matches[$section->id] = $section;
+            }
+        }
+
+        return count($matches) === 1 ? array_values($matches)[0] : null;
+    }
+
+    /**
+     * @return EntryType[]
+     */
+    private function matchingEntryTypes(Section $section, string $requested): array
+    {
+        $needle = $this->normalize($requested);
+        if ($needle === '') {
+            return [];
+        }
+
+        $matches = [];
         foreach ($section->getEntryTypes() as $entryType) {
-            if (strcasecmp($entryType->handle, $handle) === 0) {
-                return $entryType;
+            if ($this->normalize($entryType->handle) === $needle || $this->normalize($entryType->name) === $needle) {
+                $matches[$entryType->id] = $entryType;
+            }
+        }
+
+        return array_values($matches);
+    }
+
+    private function sectionByHandle(string $handle): ?Section
+    {
+        $needle = $this->normalize($handle);
+        foreach (Craft::$app->getEntries()->getAllSections() as $section) {
+            if ($this->normalize($section->handle) === $needle) {
+                return $section;
             }
         }
 
         return null;
     }
 
-    private function aliasedEntryTypeHandle(?string $handle): string
+    private function normalize(string $value): string
     {
-        $normalized = strtolower((string)preg_replace('/[^a-z0-9]+/i', '', (string)$handle));
-        if (in_array($normalized, ['page', 'basicpage'], true)) {
-            return 'basicPage';
+        return strtolower((string)preg_replace('/[^a-z0-9]+/i', '', $value));
+    }
+
+    /**
+     * @return string[]
+     */
+    private function matrixHandles(Entry $owner): array
+    {
+        $handles = [];
+        foreach ($this->customFields($owner->getType()) as $custom) {
+            if ($custom['field'] instanceof Matrix) {
+                $handles[] = $custom['field']->handle;
+            }
         }
 
-        return trim((string)$handle);
+        return $handles;
     }
 
     /**

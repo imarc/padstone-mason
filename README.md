@@ -1,6 +1,6 @@
 # Padstone Mason (Wildly Experimental)
 
-Control-panel chat for entries that use the Content Designer field (`contentDesigner`). It can also edit the other fields on that entry’s layout, including the hero. Edits go to a named draft called **Mason**. A second chat on the same entry gets the next numbered draft, such as **Mason 2**. Nothing goes live until someone publishes that draft.
+Control-panel chat for entries the current user can save. It edits the fields on that entry's layout, including Matrix fields such as the hero and Content Designer when they are present. New entries can be created only in the sections listed in settings. If a request does not name one allowed section and one entry type on it, Mason asks which to use and shows the sections and entry types it knows. Edits go to a named draft called **Mason**. A second chat on the same entry gets the next numbered draft, such as **Mason 2**. Nothing goes live until someone publishes that draft.
 
 ## Setup
 
@@ -27,8 +27,8 @@ Turn **Enabled** off to hide the assistant. The settings screen stays available.
 
 ## Use
 
-- On an entry edit screen that includes Content Designer, open **Ask Mason**. The slideout lists that entry’s chats, shows the selected transcript, a preview when the section has one, and a link to that chat’s draft.
-- **Padstone Mason → Ask Mason** lists every chat you own and can start a new one with no entry open. The first created page becomes that conversation’s draft. The same chat can keep editing that draft.
+- On an entry edit screen for an entry you can save, open **Ask Mason**. The slideout lists that entry’s chats, shows the selected transcript, a preview when the section has one, and a link to that chat’s draft.
+- **Padstone Mason → Ask Mason** lists every chat you own and can start a new one with no entry open. The first created page becomes that conversation’s draft. The same chat can keep editing that draft, or attach itself to an existing entry you can save. That attachment starts a Mason draft of the existing entry.
 - **New chat** starts an empty transcript. On an entry, it also creates a separate draft so chats do not edit each other.
 - **Delete** removes the chat and its messages. The draft stays in place.
 - **Publish** applies the draft. Craft’s own view, save, and create permissions still apply.
@@ -38,7 +38,7 @@ Each person only sees their own chats. The assistant does not read unsaved chang
 
 ## What it can edit
 
-Block types already on Content Designer, including nested Matrix fields such as columns and cards. The page hero is a Matrix field on the entry layout (`hero`), usually one Standard Hero block, and is edited the same way. Other writable layout fields, such as the breadcrumb title, can be updated on the entry. Writable fields are plain text, CKEditor, lightswitch, dropdown, link, regex, and existing assets or entries by id.
+The fields on the entry's layout. Matrix fields, including Content Designer and the hero when those fields exist, can take their existing block types, including nested fields such as columns and cards. Other writable layout fields, such as the breadcrumb title, can be updated on the entry. Writable fields are plain text, CKEditor, lightswitch, dropdown, link, regex, and existing assets or entries by id.
 
 A shared section is a relation to an existing shared block. Inner blocks are not copied.
 

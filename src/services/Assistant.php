@@ -137,7 +137,14 @@ class Assistant extends Component
             return ['ok' => false, 'error' => 'There is no draft to publish.', 'saved' => false];
         }
 
-        return Plugin::getInstance()->contentDesigner->publishDraft($draft, $user);
+        $result = Plugin::getInstance()->contentDesigner->publishDraft($draft, $user);
+        if (!empty($result['ok'])) {
+            $conversation->entryId = (int)($result['entryId'] ?? $conversation->entryId);
+            $conversation->draftId = null;
+            $conversation->save(false);
+        }
+
+        return $result;
     }
 
     /**
@@ -162,7 +169,7 @@ class Assistant extends Component
             ],
             [
                 'name' => 'create_page',
-                'description' => 'Create an unpublished page draft in an allowed section. Only call this when no entry is bound. A page uses section pages and entry type basicPage. page is an alias for basicPage.',
+                'description' => 'Create an unpublished draft in an allowed section using an entry type assigned to that section. Only call this when no entry is bound and the section and entry type are each an exact match. If they are not, ask the admin and include the sections and entry types from the instructions. Do not call this until they choose.',
                 'parameters' => $object + ['properties' => [
                     'title' => ['type' => 'string'],
                     'section' => ['type' => 'string'],
@@ -218,8 +225,15 @@ class Assistant extends Component
                 ]],
             ],
             [
+                'name' => 'rebind_entry',
+                'description' => 'Bind this conversation to an existing entry the current user can save. Pass the entry id from find_elements. If several entries match, ask the admin which id to use and do not call this yet. A later edit uses a Mason draft of that entry. The previous draft is left in place.',
+                'parameters' => $object + ['properties' => [
+                    'entryId' => ['type' => 'integer'],
+                ], 'required' => ['entryId']],
+            ],
+            [
                 'name' => 'find_elements',
-                'description' => 'Find existing assets or entries by title so they can be related. This does not upload files.',
+                'description' => 'Find existing assets or entries by title so they can be related, or so an entry can be passed to rebind_entry. This does not upload files.',
                 'parameters' => $object + ['properties' => [
                     'kind' => ['type' => 'string', 'enum' => ['asset', 'entry']],
                     'title' => ['type' => 'string'],
@@ -253,6 +267,7 @@ class Assistant extends Component
             'reorder_blocks' => $this->reorder($arguments, $conversation, $user),
             'remove_block' => $this->remove($arguments, $conversation, $user),
             'update_entry' => $this->updateEntry($arguments, $conversation, $user),
+            'rebind_entry' => $this->rebind($arguments, $conversation, $user),
             'find_elements' => $service->findElements((string)($arguments['kind'] ?? 'entry'), (string)($arguments['title'] ?? ''), $user),
             'publish_draft' => $this->publish($conversation, $user),
             default => ['ok' => false, 'saved' => false, 'error' => 'The change was not saved. That action is not available.'],
@@ -275,9 +290,9 @@ class Assistant extends Component
 
     private function readBound(ConversationRecord $conversation, User $user): array
     {
-        $draft = $this->boundDraft($conversation, $user);
-        if (!$draft) {
-            return ['ok' => false, 'saved' => false, 'error' => 'No entry is bound to this conversation.'];
+        $draft = $this->editableDraft($conversation, $user);
+        if (!$draft instanceof Entry) {
+            return $draft;
         }
 
         return Plugin::getInstance()->contentDesigner->readLayout($draft, $user);
@@ -302,6 +317,101 @@ class Assistant extends Component
         }
 
         return $result;
+    }
+
+    /**
+     * @param array<string, mixed> $arguments
+     */
+    private function rebind(array $arguments, ConversationRecord $conversation, User $user): array
+    {
+        $entryId = (int)($arguments['entryId'] ?? 0);
+        if ($entryId < 1) {
+            return ['ok' => false, 'saved' => false, 'error' => 'An entry id is required.'];
+        }
+
+        $entry = $this->entryForRebind($entryId, $conversation->siteId ? (int)$conversation->siteId : null);
+        if (!$entry || !Craft::$app->getElements()->canView($entry, $user)) {
+            return ['ok' => false, 'saved' => false, 'error' => 'That entry was not found.'];
+        }
+
+        $canonical = $entry->getCanonical(true);
+        if (!Craft::$app->getElements()->canSave($canonical, $user)) {
+            return ['ok' => false, 'saved' => false, 'error' => 'You do not have permission to save that entry.'];
+        }
+
+        if ((int)$conversation->entryId === (int)$canonical->id) {
+            $draft = $this->editableDraft($conversation, $user);
+            if (!$draft instanceof Entry) {
+                return $draft;
+            }
+
+            return $this->rebindPayload($draft);
+        }
+
+        if ($canonical->getIsDraft()) {
+            Plugin::getInstance()->conversations->bind(
+                $conversation,
+                (int)$canonical->id,
+                $canonical->draftId ? (int)$canonical->draftId : null,
+                (int)$canonical->siteId,
+            );
+
+            return $this->rebindPayload($canonical);
+        }
+
+        $forked = Plugin::getInstance()->contentDesigner->forkAssistantDraft($canonical, $user);
+        if (empty($forked['ok'])) {
+            return $forked;
+        }
+
+        /** @var Entry $draft */
+        $draft = $forked['entry'];
+        Plugin::getInstance()->conversations->bind(
+            $conversation,
+            (int)$draft->getCanonicalId(),
+            $draft->draftId ? (int)$draft->draftId : null,
+            (int)$draft->siteId,
+        );
+
+        return $this->rebindPayload($draft);
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function rebindPayload(Entry $draft): array
+    {
+        return array_merge([
+            'ok' => true,
+            'saved' => true,
+            'rebound' => true,
+            'entryId' => (int)$draft->getCanonicalId(),
+            'draftId' => $draft->draftId ? (int)$draft->draftId : null,
+            'title' => (string)$draft->title,
+        ], Plugin::getInstance()->contentDesigner->previewFor($draft));
+    }
+
+    private function entryForRebind(int $entryId, ?int $siteId): ?Entry
+    {
+        foreach ([false, null] as $drafts) {
+            $query = Entry::find()->id($entryId)->status(null)->drafts($drafts);
+            if ($siteId) {
+                $query->siteId($siteId);
+            }
+            $entry = $query->one();
+            if ($entry instanceof Entry) {
+                return $entry;
+            }
+            if (!$siteId) {
+                continue;
+            }
+            $entry = Entry::find()->id($entryId)->status(null)->drafts($drafts)->one();
+            if ($entry instanceof Entry) {
+                return $entry;
+            }
+        }
+
+        return null;
     }
 
     private function addBlock(array $arguments, ConversationRecord $conversation, User $user): array
@@ -363,9 +473,9 @@ class Assistant extends Component
 
     private function updateEntry(array $arguments, ConversationRecord $conversation, User $user): array
     {
-        $draft = $this->boundDraft($conversation, $user);
-        if (!$draft) {
-            return ['ok' => false, 'saved' => false, 'error' => 'No entry is bound to this conversation.'];
+        $draft = $this->editableDraft($conversation, $user);
+        if (!$draft instanceof Entry) {
+            return $draft;
         }
 
         return Plugin::getInstance()->contentDesigner->updateEntry($draft, $arguments, $user);
@@ -377,19 +487,14 @@ class Assistant extends Component
             return $this->ownedBlock($conversation, $user, (int)$parentId);
         }
 
-        $draft = $this->boundDraft($conversation, $user);
-        if (!$draft) {
-            return ['ok' => false, 'saved' => false, 'error' => 'No entry is bound to this conversation.'];
-        }
-
-        return $draft;
+        return $this->editableDraft($conversation, $user);
     }
 
     private function ownedBlock(ConversationRecord $conversation, User $user, int $blockId): Entry|array
     {
-        $draft = $this->boundDraft($conversation, $user);
-        if (!$draft) {
-            return ['ok' => false, 'saved' => false, 'error' => 'No entry is bound to this conversation.'];
+        $draft = $this->editableDraft($conversation, $user);
+        if (!$draft instanceof Entry) {
+            return $draft;
         }
         $block = Plugin::getInstance()->contentDesigner->blockFromId($blockId, $draft->siteId);
         if (!$block) {
@@ -406,6 +511,33 @@ class Assistant extends Component
         }
 
         return ['ok' => false, 'saved' => false, 'error' => 'That block is not on this draft.'];
+    }
+
+    private function editableDraft(ConversationRecord $conversation, User $user): Entry|array
+    {
+        $entry = $this->boundDraft($conversation, $user);
+        if (!$entry) {
+            return ['ok' => false, 'saved' => false, 'error' => 'No entry is bound to this conversation.'];
+        }
+        if ($entry->getIsDraft() && !$entry->isProvisionalDraft) {
+            return $entry;
+        }
+
+        $forked = Plugin::getInstance()->contentDesigner->forkAssistantDraft($entry, $user);
+        if (empty($forked['ok'])) {
+            return $forked;
+        }
+
+        /** @var Entry $draft */
+        $draft = $forked['entry'];
+        Plugin::getInstance()->conversations->bind(
+            $conversation,
+            (int)$draft->getCanonicalId(),
+            $draft->draftId ? (int)$draft->draftId : null,
+            (int)$draft->siteId,
+        );
+
+        return $draft;
     }
 
     private function boundDraft(ConversationRecord $conversation, User $user): ?Entry
@@ -436,7 +568,12 @@ class Assistant extends Component
             'Matrix fields on the entry layout, including hero and contentDesigner, are edited with the block tools. Pass fieldHandle. A field at its maximum is updated in place, not added again. Writable scalar layout fields are edited with update_entry values.',
             'Use only fields and block types returned by describe_schema. If the user asks for a new block type, a project config change, an upload, or an MCP server, say the change was not saved and explain the limit. Do not claim a change was saved when a tool returns ok false.',
             'Edits stay on a draft until publish_draft is called.',
-            'When the user asks for a page, create it in the pages section with entry type basicPage. There is no entry type named page.',
+            'Publishing keeps this conversation bound to the same entry. A missing draft id means the live entry is still bound, and the next edit starts a new draft of it.',
+            'To edit an existing entry, call find_elements and then rebind_entry with its id. If more than one entry matches, ask the admin which id to use. Do not say rebinding is unavailable, and do not call create_page for an entry that already exists.',
+            'When a request does not identify exactly one allowed section and exactly one entry type on that section, ask the admin which to use and include the sections and entry types below. Do not say the request is impossible or a project config change. Do not call create_page until the admin has identified one section and one entry type.',
+            'A tool result that says to ask the admin is a question for them, not a final failure. Include the sections it returned.',
+            'Allowed sections and entry types:',
+            Plugin::getInstance()->contentDesigner->sectionCatalogText(),
             'Bound entry id: ' . ($conversation->entryId ?? 'none') . '.',
             'Bound draft id: ' . ($conversation->draftId ?? 'none') . '.',
             'Site id: ' . ($conversation->siteId ?? 'primary') . '.',
