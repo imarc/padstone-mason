@@ -1,0 +1,47 @@
+<div
+    class="padstone-mason"
+    data-assistant-root
+    data-conversation-id="{{ conversation.id ?? '' }}"
+    data-scope="{{ scope }}"
+    {% if entryId %}data-entry-id="{{ entryId }}"{% endif %}
+    {% if siteId %}data-site-id="{{ siteId }}"{% endif %}
+    {% if previewUrl %}data-preview-url="{{ previewUrl }}"{% endif %}
+    {% if editUrl %}data-edit-url="{{ editUrl }}"{% endif %}
+>
+    <div class="padstone-mason__layout">
+        <aside class="padstone-mason__list" aria-label="Chats">
+            <button type="button" class="btn" data-assistant-new>New chat</button>
+            <ul class="padstone-mason__conversations" data-assistant-conversations>
+                {% for item in conversations %}
+                    <li>
+                        <button type="button" data-assistant-select data-conversation-id="{{ item.id }}"{% if conversation and item.id == conversation.id %} aria-current="true"{% endif %}>{{ item.title }}</button>
+                    </li>
+                {% endfor %}
+            </ul>
+            <button type="button" class="btn" data-assistant-delete {% if not conversation %}hidden{% endif %}>Delete</button>
+        </aside>
+
+        <div class="padstone-mason__chat">
+            <p class="padstone-mason__note">{{ draftNote }}</p>
+
+            <div class="padstone-mason__transcript" data-assistant-transcript>
+                {% for message in messages %}
+                    <article class="padstone-mason__message padstone-mason__message--{{ message.role }}" data-role="{{ message.role }}">
+                        {{ message.content|markdown('gfm') }}
+                    </article>
+                {% endfor %}
+            </div>
+
+            <form class="padstone-mason__form" data-assistant-form>
+                <input type="hidden" name="conversationId" value="{{ conversation.id ?? '' }}">
+                <textarea name="message" rows="4" required placeholder="Describe the page change"></textarea>
+                <div class="padstone-mason__actions">
+                    <button type="submit" class="btn submit">Send</button>
+                    <span class="padstone-mason__hint">Enter to send, Shift+Enter or ⌘+Enter for a new line</span>
+                    <button type="button" class="btn" data-assistant-publish>Publish draft</button>
+                    <button type="button" class="btn" data-assistant-preview-toggle {% if not previewUrl %}hidden{% endif %} aria-expanded="false">Preview</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>

@@ -1,0 +1,1227 @@
+<?php
+
+namespace imarc\padstonemason\console\controllers;
+
+use Craft;
+use craft\elements\Entry;
+use craft\elements\User;
+use craft\enums\CmsEdition;
+use GuzzleHttp\Client;
+use GuzzleHttp\Handler\MockHandler;
+use GuzzleHttp\HandlerStack;
+use GuzzleHttp\Middleware;
+use GuzzleHttp\Psr7\Response;
+use craft\web\View;
+use imarc\padstonemason\controllers\ChatController;
+use imarc\padstonemason\controllers\UsageController;
+use imarc\padstonemason\models\Settings;
+use imarc\padstonemason\Plugin;
+use imarc\padstonemason\records\ConversationRecord;
+use imarc\padstonemason\records\MessageRecord;
+use imarc\padstonemason\records\UsageRecord;
+use imarc\padstonemason\services\providers\AnthropicClient;
+use imarc\padstonemason\services\providers\OpenAiClient;
+use imarc\padstonemason\services\providers\ProviderClient;
+use imarc\padstonemason\services\providers\ProviderResult;
+use imarc\padstonemason\services\providers\ToolInput;
+use ReflectionMethod;
+use yii\console\Controller;
+use yii\console\ExitCode;
+
+class CheckController extends Controller
+{
+    /** @var int[] */
+    private array $elementIds = [];
+
+    /** @var int[] */
+    private array $conversationIds = [];
+
+    /** @var int[] */
+    private array $userIds = [];
+
+    /** @var string[] */
+    private array $failures = [];
+
+    public function actionIndex(): int
+    {
+        $admin = User::find()->admin(true)->one();
+        if (!$admin instanceof User) {
+            $this->stderr("No admin user found.\n");
+
+            return ExitCode::UNSPECIFIED_ERROR;
+        }
+
+        Craft::$app->getUser()->setIdentity($admin);
+        $plugin = Plugin::getInstance();
+
+        try {
+            $this->checkSettingsShape();
+            $this->checkSettingsSave($plugin);
+            $this->checkIdentity($plugin, $admin);
+            $this->checkPermissions($plugin, $admin);
+            $this->checkProviders($plugin);
+            $this->checkEditing($plugin, $admin);
+            $this->checkAssistantLoop($plugin, $admin);
+            $this->checkConversations($plugin, $admin);
+            $this->checkUsage($plugin, $admin);
+            $this->checkSecrets();
+        } finally {
+            Craft::$app->getUser()->setIdentity($admin);
+            $this->cleanup();
+        }
+
+        if ($this->failures !== []) {
+            foreach ($this->failures as $failure) {
+                $this->stderr("FAIL: $failure\n");
+            }
+
+            return ExitCode::UNSPECIFIED_ERROR;
+        }
+
+        $this->stdout("Padstone Mason checks passed.\n");
+
+        return ExitCode::OK;
+    }
+
+    private function checkSettingsShape(): void
+    {
+        $names = array_keys((new Settings())->getAttributes());
+        foreach (['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'apiKey', 'openaiApiKey', 'anthropicApiKey'] as $secret) {
+            if (in_array($secret, $names, true)) {
+                $this->failures[] = "Settings model stores $secret";
+            }
+        }
+    }
+
+    private function checkSettingsSave(Plugin $plugin): void
+    {
+        $settings = $plugin->getSettings();
+        $original = $settings->getAttributes();
+        $settings->provider = 'anthropic';
+        $settings->defaultModel = 'claude-sonnet-4-5';
+        $settings->allowedSections = ['pages'];
+        if (!Craft::$app->getPlugins()->savePluginSettings($plugin, $settings->getAttributes())) {
+            $this->failures[] = 'Could not save plugin settings: ' . json_encode($settings->getErrors());
+
+            return;
+        }
+
+        Craft::$app->getProjectConfig()->flush();
+        $yaml = $this->projectConfigText();
+        if (!str_contains($yaml, 'claude-sonnet-4-5') || !str_contains($yaml, 'anthropic')) {
+            $this->failures[] = 'Saved provider and model were not written to project config.';
+        }
+        if (str_contains($yaml, 'OPENAI_API_KEY') || str_contains($yaml, 'ANTHROPIC_API_KEY')) {
+            $this->failures[] = 'Project config contains an API key setting.';
+        }
+
+        $reloaded = Craft::$app->getPlugins()->getPlugin('padstone-mason');
+        if (!$reloaded instanceof Plugin || $reloaded->getSettings()->defaultModel !== 'claude-sonnet-4-5') {
+            $this->failures[] = 'Saved settings did not survive a plugin reload.';
+        }
+
+        $plugin->getSettings()->setAttributes($original, false);
+        Craft::$app->getPlugins()->savePluginSettings($plugin, $original);
+    }
+
+    private function checkIdentity(Plugin $plugin, User $admin): void
+    {
+        Craft::$app->getUser()->setIdentity($admin);
+        $nav = $plugin->getCpNavItem();
+        $button = $plugin->editorButtonHtml($this->samplePage($admin));
+        if (($nav['label'] ?? '') !== 'Padstone Mason' || ($nav['subnav']['chat']['label'] ?? '') !== 'Ask Mason' || !str_contains($button, '>Ask Mason</button>') || !str_contains($button, 'data-padstone-mason')) {
+            $this->failures[] = 'Padstone Mason is not the nav label, or Ask Mason is not the chat link and entry button.';
+        }
+
+        $tables = [
+            ConversationRecord::tableName(),
+            MessageRecord::tableName(),
+            UsageRecord::tableName(),
+        ];
+        foreach (['padstonemason_conversations', 'padstonemason_messages', 'padstonemason_usage'] as $name) {
+            $token = '{{%' . $name . '}}';
+            if (!in_array($token, $tables, true) || Craft::$app->getDb()->getTableSchema($token) === null) {
+                $this->failures[] = 'Table ' . $name . ' is missing.';
+            }
+        }
+    }
+
+    private function checkPermissions(Plugin $plugin, User $admin): void
+    {
+        $method = new ReflectionMethod(\craft\controllers\PluginsController::class, 'beforeAction');
+        $source = $this->methodSource($method);
+        if (!str_contains($source, 'requireAdmin')) {
+            $this->failures[] = 'Craft plugin settings are not limited to admins.';
+        }
+
+        $viewer = $this->makeUser(false);
+        $this->withPermissionChecks(function () use ($plugin, $viewer, $admin): void {
+            Craft::$app->getUser()->setIdentity($viewer);
+            if ($plugin->getCpNavItem() !== null) {
+                $this->failures[] = 'A user without the assistant permission can see the nav item.';
+            }
+            if ($plugin->editorButtonHtml($this->samplePage($admin)) !== '') {
+                $this->failures[] = 'A user without the assistant permission can see the editor button.';
+            }
+        });
+
+        $plugin->getSettings()->enabled = false;
+        Craft::$app->getUser()->setIdentity($admin);
+        if ($plugin->isAvailableToCurrentUser() || $plugin->editorButtonHtml($this->samplePage($admin)) !== '') {
+            $this->failures[] = 'The assistant stays available while disabled.';
+        }
+        if ($plugin->assistant->configurationError() !== 'The assistant is disabled.') {
+            $this->failures[] = 'A disabled assistant did not refuse the request.';
+        }
+        $plugin->getSettings()->enabled = true;
+        Craft::$app->getUser()->setIdentity($admin);
+    }
+
+    private function checkProviders(Plugin $plugin): void
+    {
+        $plugin->getSettings()->provider = 'openai';
+        $plugin->getSettings()->defaultModel = 'gpt-4.1';
+        $this->assertClientRequest(
+            new OpenAiClient('test-key', $this->mockHttp([
+                'choices' => [['message' => ['content' => 'ok']]],
+                'usage' => ['prompt_tokens' => 2, 'completion_tokens' => 3],
+            ], $openaiHistory)),
+            'api.openai.com',
+            'gpt-4.1',
+            $openaiHistory,
+        );
+
+        $plugin->getSettings()->provider = 'anthropic';
+        $plugin->getSettings()->defaultModel = 'claude-sonnet-4-5';
+        $this->assertClientRequest(
+            new AnthropicClient('test-key', $this->mockHttp([
+                'content' => [['type' => 'text', 'text' => 'ok']],
+                'usage' => ['input_tokens' => 2, 'output_tokens' => 3],
+            ], $anthropicHistory)),
+            'api.anthropic.com',
+            'claude-sonnet-4-5',
+            $anthropicHistory,
+        );
+
+        $plugin->getSettings()->provider = 'openai';
+        $plugin->getSettings()->defaultModel = 'gpt-4.1';
+
+        if (ToolInput::json([]) !== '{}' || ToolInput::json(['type' => 'richText']) !== '{"type":"richText"}') {
+            $this->failures[] = 'Empty tool arguments were not encoded as an object.';
+        }
+        $emptyInput = [];
+        $this->assertClientRequest(
+            new AnthropicClient('test-key', $this->mockHttp([
+                'content' => [['type' => 'text', 'text' => 'ok']],
+            ], $emptyInput)),
+            'api.anthropic.com',
+            'claude-sonnet-4-5',
+            $emptyInput,
+            [
+                ['role' => 'user', 'content' => 'Read the page'],
+                ['role' => 'assistant', 'toolCalls' => [[
+                    'id' => 'toolu_read',
+                    'name' => 'read_layout',
+                    'arguments' => [],
+                ]]],
+                ['role' => 'tool', 'toolCallId' => 'toolu_read', 'content' => '{"ok":true}'],
+            ],
+        );
+        $emptyRequest = $emptyInput[0]['request'] ?? null;
+        if ($emptyRequest) {
+            $emptyRequest->getBody()->rewind();
+        }
+        $emptyBody = $emptyRequest ? (string)$emptyRequest->getBody() : '';
+        if (!str_contains($emptyBody, '"input":{}')) {
+            $this->failures[] = 'Anthropic tool input was not sent as an object.';
+        }
+
+        $key = 'sk-testkeyvalue12345678';
+        try {
+            (new OpenAiClient($key, $this->mockHttpStatus(401, [
+                'error' => ['message' => "Incorrect API key provided: $key"],
+            ])))->complete([['role' => 'user', 'content' => 'hi']], [], 'gpt-4.1', 16);
+            $this->failures[] = 'A failed provider response did not throw.';
+        } catch (\RuntimeException $e) {
+            $message = $e->getMessage();
+            if (!str_contains($message, '401') || !str_contains($message, 'Incorrect API key') || str_contains($message, $key)) {
+                $this->failures[] = 'Provider error was not a safe status message: ' . $message;
+            }
+        }
+    }
+
+    private function checkEditing(Plugin $plugin, User $admin): void
+    {
+        Craft::$app->getUser()->setIdentity($admin);
+        $schema = $plugin->contentDesigner->describeSchema('basicPage', $admin);
+        if (empty($schema['ok'])) {
+            $this->failures[] = 'Schema discovery failed: ' . ($schema['error'] ?? '');
+
+            return;
+        }
+        $handles = array_column($schema['blockTypes'], 'handle');
+        if (!in_array('richText', $handles, true) || !in_array('twoColumnSection', $handles, true)) {
+            $this->failures[] = 'Schema is missing registered block types.';
+        }
+        $layoutHandles = array_column($schema['layoutFields'] ?? [], 'handle');
+        $heroField = null;
+        foreach ($schema['layoutFields'] ?? [] as $layoutField) {
+            if (($layoutField['handle'] ?? '') === 'hero') {
+                $heroField = $layoutField;
+            }
+        }
+        $heroTypes = array_column($heroField['blockTypes'] ?? [], 'handle');
+        if (!in_array('hero', $layoutHandles, true) || !in_array('breadcrumbTitle', $layoutHandles, true) || !in_array('standardHero', $heroTypes, true) || (int)($heroField['maxEntries'] ?? 0) !== 1) {
+            $this->failures[] = 'Schema did not describe the hero layout field.';
+        }
+        if (in_array('notARealBlock', $handles, true)) {
+            $this->failures[] = 'Schema listed an unregistered block type.';
+        }
+        $twoColumn = $this->fieldOnType($schema['blockTypes'], 'twoColumnSection', 'subBlocks');
+        if (!$twoColumn || (int)$twoColumn['minEntries'] !== 2 || (int)$twoColumn['maxEntries'] !== 2) {
+            $this->failures[] = 'subBlocks min/max was not 2.';
+        }
+
+        $refused = $plugin->contentDesigner->createPage([
+            'title' => 'Assistant check news page',
+            'section' => 'pages',
+            'entryType' => 'newsPage',
+        ], $admin);
+        if (!empty($refused['ok'])) {
+            $this->failures[] = 'Created a page whose entry type has no Content Designer field.';
+            $this->elementIds[] = (int)$refused['entryId'];
+        }
+
+        $plugin->getSettings()->allowedSections = [];
+        $blockedSection = $plugin->contentDesigner->createPage([
+            'title' => 'Assistant check blocked',
+            'section' => 'pages',
+            'entryType' => 'basicPage',
+        ], $admin);
+        if (!empty($blockedSection['ok'])) {
+            $this->failures[] = 'Created a page while the section allow-list was empty.';
+            $this->elementIds[] = (int)$blockedSection['entryId'];
+        }
+        $plugin->getSettings()->allowedSections = ['pages'];
+
+        $aliasedSchema = $plugin->contentDesigner->describeSchema('page', $admin);
+        if (empty($aliasedSchema['ok']) || ($aliasedSchema['entryType'] ?? '') !== 'basicPage') {
+            $this->failures[] = 'The page alias did not resolve to basicPage.';
+        }
+        $aliased = $plugin->contentDesigner->createPage([
+            'title' => 'Assistant check page alias',
+            'section' => 'pages',
+            'entryType' => 'page',
+            'slug' => 'assistant-check-alias-' . uniqid(),
+        ], $admin);
+        if (empty($aliased['ok'])) {
+            $this->failures[] = 'Could not create a page from the page alias: ' . ($aliased['error'] ?? '');
+        } else {
+            $this->elementIds[] = (int)$aliased['entryId'];
+            $aliasDraft = $plugin->contentDesigner->entryFromId((int)$aliased['entryId'], (int)$aliased['draftId'], null, $admin);
+            if (!$aliasDraft || $aliasDraft->getType()->handle !== 'basicPage') {
+                $this->failures[] = 'A page alias draft was not a basicPage.';
+            }
+        }
+
+        $created = $plugin->contentDesigner->createPage([
+            'title' => 'Assistant check page',
+            'section' => 'pages',
+            'entryType' => 'basicPage',
+            'slug' => 'assistant-check-' . uniqid(),
+        ], $admin);
+        if (empty($created['ok']) || empty($created['unpublished'])) {
+            $this->failures[] = 'Could not create an unpublished page draft: ' . ($created['error'] ?? '');
+
+            return;
+        }
+        $this->elementIds[] = (int)$created['entryId'];
+        $draft = $plugin->contentDesigner->entryFromId((int)$created['entryId'], (int)$created['draftId'], null, $admin);
+        if (!$draft || Entry::find()->id($draft->id)->one()) {
+            $this->failures[] = 'The new page is live before publish.';
+        }
+        if (empty($created['previewUrl'])) {
+            $this->failures[] = 'A pages draft did not return a preview URL.';
+        }
+
+        $viewer = $this->viewer($admin);
+        $this->withPermissionChecks(function () use ($plugin, $draft, $viewer): void {
+            Craft::$app->getUser()->setIdentity($viewer);
+            $denied = $plugin->contentDesigner->updateEntry($draft, ['title' => 'Nope'], $viewer);
+            if (!empty($denied['ok'])) {
+                $this->failures[] = 'A view-only user updated a draft.';
+            }
+        });
+        Craft::$app->getUser()->setIdentity($admin);
+        $draft = $plugin->contentDesigner->entryFromId((int)$created['entryId'], (int)$created['draftId'], null, $admin);
+
+        $hero = $plugin->contentDesigner->addBlock($draft, 'hero', 'standardHero', null, [
+            'heroEyebrow' => 'About',
+            'heroHeadline' => 'About us',
+            'heroContent' => '<p>Hello</p>',
+            'ctaLink' => 'https://example.com/about',
+            'background' => 'accent-primary',
+        ], [], $admin);
+        $draft = $plugin->contentDesigner->entryFromId((int)$created['entryId'], (int)$created['draftId'], null, $admin);
+        $heroLayout = $draft ? $plugin->contentDesigner->readLayout($draft, $admin) : [];
+        $heroBlocks = $heroLayout['matrices']['hero']['blocks'] ?? [];
+        $secondHero = $draft ? $plugin->contentDesigner->addBlock($draft, 'hero', 'standardHero', null, [
+            'heroHeadline' => 'Second',
+        ], [], $admin) : ['ok' => true];
+        $breadcrumb = $draft ? $plugin->contentDesigner->updateEntry($draft, [
+            'values' => ['breadcrumbTitle' => 'About', 'showBreadcrumbs' => false],
+        ], $admin) : ['ok' => false];
+        $draft = $plugin->contentDesigner->entryFromId((int)$created['entryId'], (int)$created['draftId'], null, $admin);
+        $afterHero = $draft ? $plugin->contentDesigner->readLayout($draft, $admin) : [];
+        if (
+            empty($hero['ok'])
+            || ($heroBlocks[0]['fields']['heroHeadline'] ?? null) !== 'About us'
+            || !in_array('background is read-only and was skipped.', $hero['skipped'] ?? [], true)
+            || !empty($secondHero['ok'])
+            || empty($breadcrumb['ok'])
+            || ($afterHero['fields']['breadcrumbTitle'] ?? null) !== 'About'
+            || ($afterHero['fields']['showBreadcrumbs'] ?? null) !== false
+        ) {
+            $this->failures[] = 'The hero layout field could not be edited: ' . ($hero['error'] ?? '') . ' ' . json_encode($heroBlocks) . ' ' . json_encode($afterHero['fields'] ?? []);
+        }
+
+        $added = $plugin->contentDesigner->addBlock($draft, 'contentDesigner', 'richText', 0, [
+            'headline' => 'First',
+            'blockContent' => '<p>First</p>',
+        ], [], $admin);
+        if (empty($added['ok'])) {
+            $this->failures[] = 'Could not add a rich text block: ' . ($added['error'] ?? '');
+
+            return;
+        }
+        $firstId = (int)$added['blockId'];
+        $draft = $plugin->contentDesigner->entryFromId((int)$created['entryId'], (int)$created['draftId'], null, $admin);
+        $second = $plugin->contentDesigner->addBlock($draft, 'contentDesigner', 'richText', null, [
+            'headline' => 'Second',
+            'blockContent' => '<p>Second</p>',
+        ], [], $admin);
+        if (empty($second['ok'])) {
+            $this->failures[] = 'Could not add a second block: ' . ($second['error'] ?? '');
+
+            return;
+        }
+        $layout = $plugin->contentDesigner->readLayout($draft, $admin);
+        $ids = array_column($layout['blocks'] ?? [], 'id');
+        if ($ids !== [$firstId, (int)$second['blockId']]) {
+            $this->failures[] = 'Block order after insert was ' . json_encode($ids);
+        }
+
+        $block = $plugin->contentDesigner->blockFromId($firstId, $draft->siteId);
+        $updated = $plugin->contentDesigner->updateBlock($block, ['headline' => 'Updated'], $admin);
+        if (empty($updated['ok'])) {
+            $this->failures[] = 'Could not update a headline: ' . ($updated['error'] ?? '');
+        } else {
+            $block = $plugin->contentDesigner->blockFromId($firstId, $draft->siteId);
+            $content = (string)$block->getFieldValue('blockContent');
+            if ($block->getFieldValue('headline') !== 'Updated' || !str_contains($content, 'First')) {
+                $this->failures[] = 'A partial update changed another field.';
+            }
+        }
+
+        $badOrder = $plugin->contentDesigner->reorderBlocks($draft, 'contentDesigner', [$firstId], $admin);
+        if (!empty($badOrder['ok'])) {
+            $this->failures[] = 'An incomplete reorder was accepted.';
+        }
+
+        $unknown = $plugin->contentDesigner->addBlock($draft, 'contentDesigner', 'notARealBlock', null, [], [], $admin);
+        if (!empty($unknown['ok']) || !str_contains((string)($unknown['error'] ?? ''), 'not available')) {
+            $this->failures[] = 'An unknown block type was accepted.';
+        }
+
+        $beforeUpload = count($plugin->contentDesigner->readLayout($draft, $admin)['blocks'] ?? []);
+        $upload = $plugin->contentDesigner->addBlock($draft, 'contentDesigner', 'logoGridSection', null, [
+            'logos' => ['upload' => ['filename' => 'a.png', 'contents' => 'nope']],
+        ], [], $admin);
+        $afterUpload = count($plugin->contentDesigner->readLayout($draft, $admin)['blocks'] ?? []);
+        if (!empty($upload['ok']) || $afterUpload !== $beforeUpload || !str_contains((string)($upload['error'] ?? ''), 'Uploads')) {
+            $this->failures[] = 'An upload request changed the draft.';
+        }
+
+        $columns = $plugin->contentDesigner->addBlock($draft, 'contentDesigner', 'twoColumnSection', null, [
+            'headline' => 'Columns',
+        ], [
+            'subBlocks' => [
+                ['type' => 'richTextNoMedia', 'fields' => ['blockContentNoMedia' => '<p>Left</p>']],
+                ['type' => 'richTextNoMedia', 'fields' => ['blockContentNoMedia' => '<p>Right</p>']],
+            ],
+        ], $admin);
+        if (empty($columns['ok'])) {
+            $this->failures[] = 'Could not add a two-column section: ' . ($columns['error'] ?? '');
+        } else {
+            $column = $plugin->contentDesigner->blockFromId((int)$columns['blockId'], $draft->siteId);
+            $nested = $column->getFieldValue('subBlocks')->status(null)->all();
+            if (count($nested) !== 2) {
+                $this->failures[] = 'Two-column section did not save two sub blocks.';
+            }
+            $removed = $plugin->contentDesigner->removeBlock($nested[0], $admin);
+            if (!empty($removed['ok'])) {
+                $this->failures[] = 'Removed a sub block below the minimum.';
+            }
+            $skipped = $plugin->contentDesigner->updateBlock($column, [
+                'headline' => 'After skip',
+                'background' => 'not-a-pickture',
+            ], $admin);
+            if (empty($skipped['ok']) || empty($skipped['skipped'])) {
+                $this->failures[] = 'A read-only field was not reported as skipped: ' . ($skipped['error'] ?? '');
+            } elseif ($plugin->contentDesigner->blockFromId((int)$columns['blockId'], $draft->siteId)->getFieldValue('headline') !== 'After skip') {
+                $this->failures[] = 'Supported fields were not saved alongside a skipped field.';
+            }
+        }
+
+        $short = $plugin->contentDesigner->addBlock($draft, 'contentDesigner', 'twoColumnSection', null, [], [
+            'subBlocks' => [
+                ['type' => 'richTextNoMedia', 'fields' => ['blockContentNoMedia' => '<p>Only</p>']],
+            ],
+        ], $admin);
+        if (!empty($short['ok'])) {
+            $this->failures[] = 'Accepted a two-column section with one sub block.';
+        }
+
+        $shared = $this->sharedEntry($admin);
+        $related = $plugin->contentDesigner->addBlock($draft, 'contentDesigner', 'sharedSection', null, [
+            'sharedBlocks' => [(int)$shared->id],
+        ], [], $admin);
+        if (empty($related['ok'])) {
+            $this->failures[] = 'Could not relate a shared section: ' . ($related['error'] ?? '');
+        } else {
+            $draft = $plugin->contentDesigner->entryFromId((int)$created['entryId'], (int)$created['draftId'], null, $admin);
+            $layout = $plugin->contentDesigner->readLayout($draft, $admin);
+            $sharedBlocks = array_values(array_filter($layout['blocks'], fn(array $block) => $block['type'] === 'sharedSection'));
+            $relatedIds = array_column($sharedBlocks[0]['fields']['sharedBlocks'] ?? [], 'id');
+            if (!in_array((int)$shared->id, array_map('intval', $relatedIds), true)) {
+                $this->failures[] = 'Shared section did not relate the existing entry.';
+            }
+        }
+
+        $renamed = $plugin->contentDesigner->updateEntry($draft, ['title' => 'Assistant check renamed'], $admin);
+        if (empty($renamed['ok']) || Entry::find()->title('Assistant check renamed')->one()) {
+            $this->failures[] = 'Renaming the draft changed or missed the live entry.';
+        }
+
+        $noPreview = $plugin->contentDesigner->createPage([
+            'title' => 'Assistant check shared',
+            'section' => 'sharedBlocks',
+            'entryType' => 'sharedSections',
+        ], $admin);
+        $plugin->getSettings()->allowedSections = ['pages', 'sharedBlocks'];
+        $noPreview = $plugin->contentDesigner->createPage([
+            'title' => 'Assistant check shared',
+            'section' => 'sharedBlocks',
+            'entryType' => 'sharedSections',
+        ], $admin);
+        $plugin->getSettings()->allowedSections = ['pages'];
+        if (empty($noPreview['ok'])) {
+            $this->failures[] = 'Could not create a shared block draft: ' . ($noPreview['error'] ?? '');
+        } elseif (!empty($noPreview['previewAvailable'])) {
+            $this->failures[] = 'A section without a preview URL reported a preview.';
+        } else {
+            $this->elementIds[] = (int)$noPreview['entryId'];
+        }
+
+        $this->withPermissionChecks(function () use ($plugin, $draft, $viewer): void {
+            Craft::$app->getUser()->setIdentity($viewer);
+            $publishDenied = $plugin->contentDesigner->publishDraft($draft, $viewer);
+            if (!empty($publishDenied['ok'])) {
+                $this->failures[] = 'A view-only user published a draft.';
+            }
+        });
+        Craft::$app->getUser()->setIdentity($admin);
+        $published = $plugin->contentDesigner->publishDraft($draft, $admin);
+        if (empty($published['ok']) || !Entry::find()->id($draft->getCanonicalId())->one()) {
+            $this->failures[] = 'Publishing did not make the entry live: ' . ($published['error'] ?? '');
+        }
+    }
+
+    private function checkAssistantLoop(Plugin $plugin, User $admin): void
+    {
+        Craft::$app->getUser()->setIdentity($admin);
+        $_SERVER['OPENAI_API_KEY'] = 'test-key';
+        putenv('OPENAI_API_KEY=test-key');
+        $created = $plugin->contentDesigner->createPage([
+            'title' => 'Assistant check chat',
+            'section' => 'pages',
+            'entryType' => 'basicPage',
+            'slug' => 'assistant-check-chat-' . uniqid(),
+        ], $admin);
+        if (empty($created['ok'])) {
+            $this->failures[] = 'Could not create a chat draft: ' . ($created['error'] ?? '');
+
+            return;
+        }
+        $this->elementIds[] = (int)$created['entryId'];
+        $conversation = $plugin->conversations->open($admin->id, (int)$created['entryId'], (int)$created['draftId'], Craft::$app->getSites()->getPrimarySite()->id);
+        $this->conversationIds[] = (int)$conversation->id;
+
+        $script = new ScriptedClient(function(array $messages) {
+            $tools = array_values(array_filter($messages, fn(array $message) => $message['role'] === 'tool'));
+            if (count($tools) === 0) {
+                return new ProviderResult(toolCalls: [[
+                    'id' => 'add-1',
+                    'name' => 'add_block',
+                    'arguments' => [
+                        'type' => 'richText',
+                        'values' => ['headline' => 'A', 'blockContent' => '<p>A</p>'],
+                    ],
+                ]]);
+            }
+            if (count($tools) === 1) {
+                return new ProviderResult(toolCalls: [[
+                    'id' => 'add-2',
+                    'name' => 'add_block',
+                    'arguments' => [
+                        'type' => 'richText',
+                        'values' => ['headline' => 'B', 'blockContent' => '<p>B</p>'],
+                    ],
+                ]]);
+            }
+            if (count($tools) === 2) {
+                $first = json_decode($tools[0]['content'], true);
+                $second = json_decode($tools[1]['content'], true);
+
+                return new ProviderResult(toolCalls: [[
+                    'id' => 'order-1',
+                    'name' => 'reorder_blocks',
+                    'arguments' => ['orderedIds' => [(int)$second['blockId'], (int)$first['blockId']]],
+                ]]);
+            }
+
+            return new ProviderResult(text: 'Added two blocks and reordered them.');
+        });
+
+        $reply = $plugin->assistant->reply($conversation, 'Add two blocks and swap them', $admin, $script);
+        $draft = $plugin->contentDesigner->entryFromId((int)$created['entryId'], (int)$created['draftId'], null, $admin);
+        $layout = $plugin->contentDesigner->readLayout($draft, $admin);
+        $headlines = array_map(fn(array $block) => $block['fields']['headline'] ?? null, $layout['blocks'] ?? []);
+        if ($headlines !== ['B', 'A']) {
+            $this->failures[] = 'The tool loop did not add and reorder two blocks: ' . json_encode($headlines) . ' ' . ($reply['reply'] ?? '');
+        }
+        $visible = array_map(
+            fn(MessageRecord $message) => trim((string)$message->content),
+            $plugin->conversations->messagesForUser($conversation),
+        );
+        $modelToolTurns = array_filter(
+            $plugin->conversations->messagesForModel($conversation),
+            fn(array $message) => ($message['role'] ?? '') === 'assistant' && !empty($message['toolCalls']),
+        );
+        if (in_array('', $visible, true) || !in_array('Added two blocks and reordered them.', $visible, true) || $modelToolTurns === []) {
+            $this->failures[] = 'Empty tool-call messages were shown in the transcript.';
+        }
+        if (!in_array('gpt-4.1', $script->models, true) && $plugin->getSettings()->defaultModel === 'gpt-4.1') {
+            $this->failures[] = 'The assistant did not call the provider with the saved model.';
+        }
+
+        $before = count($layout['blocks'] ?? []);
+        $refused = new ScriptedClient(fn() => new ProviderResult(toolCalls: [[
+            'id' => 'bad-1',
+            'name' => 'add_block',
+            'arguments' => ['type' => 'notARealBlock'],
+        ]], text: null));
+        $refusedReply = $plugin->assistant->reply($conversation, 'Invent a block type and call MCP', $admin, $refused);
+        $after = $plugin->contentDesigner->readLayout($draft, $admin);
+        if (count($after['blocks'] ?? []) !== $before || !str_contains((string)$refusedReply['reply'], 'not saved')) {
+            $this->failures[] = 'An invented block type changed the draft or was described as saved.';
+        }
+
+        $fresh = new ConversationRecord();
+        $fresh->userId = $admin->id;
+        $fresh->siteId = Craft::$app->getSites()->getPrimarySite()->id;
+        $fresh->save(false);
+        $this->conversationIds[] = (int)$fresh->id;
+        $creator = new ScriptedClient(function(array $messages) {
+            $tools = array_values(array_filter($messages, fn(array $message) => $message['role'] === 'tool'));
+            if ($tools === []) {
+                return new ProviderResult(toolCalls: [[
+                    'id' => 'create-1',
+                    'name' => 'create_page',
+                    'arguments' => [
+                        'title' => 'Assistant check created',
+                        'section' => 'pages',
+                        'entryType' => 'basicPage',
+                    ],
+                ]]);
+            }
+
+            return new ProviderResult(text: 'Created the draft.');
+        });
+        $createdReply = $plugin->assistant->reply($fresh, 'Create a page', $admin, $creator);
+        $fresh->refresh();
+        if (!$fresh->entryId || empty($createdReply['draftId'])) {
+            $this->failures[] = 'create_page did not bind the conversation.';
+        } else {
+            $this->elementIds[] = (int)$fresh->entryId;
+            $page = $plugin->contentDesigner->entryFromId((int)$fresh->entryId, (int)$fresh->draftId, null, $admin);
+            if (!$page || !$page->getIsUnpublishedDraft()) {
+                $this->failures[] = 'The page created from chat was not an unpublished draft.';
+            }
+        }
+
+        $other = $this->makeUser(false);
+        if ($plugin->conversations->findOwned((int)$conversation->id, $other->id)) {
+            $this->failures[] = 'Another user can read the conversation.';
+        }
+
+        $failed = new ScriptedClient(function() {
+            throw new \RuntimeException('OpenAI returned 401: Incorrect API key provided: sk-testkeyvalue12345678');
+        });
+        $failedReply = $plugin->assistant->reply($conversation, 'This should fail', $admin, $failed);
+        if (!str_contains((string)($failedReply['reply'] ?? ''), '401') || str_contains((string)($failedReply['reply'] ?? ''), 'sk-testkeyvalue12345678')) {
+            $this->failures[] = 'A provider failure was not reported safely: ' . ($failedReply['reply'] ?? '');
+        }
+
+        $this->withEmptyKey(function() use ($plugin, $admin, $conversation) {
+            $beforeDrafts = (int)$conversation->draftId;
+            $result = $plugin->assistant->reply($conversation, 'Change the page', $admin, new ScriptedClient(fn() => new ProviderResult(text: 'should not run')));
+            if (($result['reply'] ?? '') !== 'The provider is not configured.' || (int)$conversation->draftId !== $beforeDrafts) {
+                $this->failures[] = 'A missing API key did not stop the request before editing.';
+            }
+        });
+    }
+
+    private function checkUsage(Plugin $plugin, User $admin): void
+    {
+        $before = UsageRecord::find()->count();
+        $plugin->usage->record($admin->id, 'openai', 'gpt-4.1', null, null);
+        if (UsageRecord::find()->count() !== $before) {
+            $this->failures[] = 'A request without token counts was recorded.';
+        }
+
+        $plugin->usage->record($admin->id, 'openai', 'gpt-4.1', 5, 7);
+        $rows = $plugin->usage->totals(date('Y-m-d'), date('Y-m-d'));
+        $match = array_values(array_filter($rows, fn(array $row) => $row['userId'] === (int)$admin->id && $row['model'] === 'gpt-4.1'));
+        if ($match === [] || $match[0]['promptTokens'] < 5) {
+            $this->failures[] = 'Admin usage totals did not include the recorded request.';
+        }
+        $record = UsageRecord::find()->orderBy(['id' => SORT_DESC])->one();
+        $attributes = $record ? $record->getAttributes() : [];
+        if (array_key_exists('content', $attributes) || array_key_exists('apiKey', $attributes)) {
+            $this->failures[] = 'Usage rows store message text or an API key.';
+        }
+
+        $source = $this->methodSource(new ReflectionMethod(UsageController::class, 'actionIndex'));
+        if (!str_contains($source, 'requireAdmin')) {
+            $this->failures[] = 'The usage page is not limited to admins.';
+        }
+    }
+
+    private function checkSecrets(): void
+    {
+        $yaml = $this->projectConfigText();
+        foreach (['OPENAI_API_KEY', 'ANTHROPIC_API_KEY'] as $name) {
+            if (preg_match('/' . $name . '\s*:/', $yaml)) {
+                $this->failures[] = "Project config contains $name.";
+            }
+        }
+    }
+
+    private function samplePage(User $admin): Entry
+    {
+        $created = Plugin::getInstance()->contentDesigner->createPage([
+            'title' => 'Assistant check button',
+            'section' => 'pages',
+            'entryType' => 'basicPage',
+            'slug' => 'assistant-check-button-' . uniqid(),
+        ], $admin);
+        if (empty($created['ok'])) {
+            throw new \RuntimeException(($created['error'] ?? 'Could not create a sample page.') . ' ' . json_encode($created['errors'] ?? []));
+        }
+        $this->elementIds[] = (int)$created['entryId'];
+        $entry = Plugin::getInstance()->contentDesigner->entryFromId((int)$created['entryId'], (int)$created['draftId'], null, $admin);
+        if (!$entry) {
+            throw new \RuntimeException($created['error'] ?? 'Could not create a sample page.');
+        }
+
+        return $entry;
+    }
+
+    private function viewer(User $admin): User
+    {
+        $user = $this->makeUser(false);
+        if (!in_array((int)$user->id, $this->userIds, true)) {
+            return $user;
+        }
+        $section = Craft::$app->getEntries()->getSectionByHandle('pages');
+        Craft::$app->getUserPermissions()->saveUserPermissions($user->id, [
+            "viewEntries:$section->uid",
+            "viewPeerEntries:$section->uid",
+        ]);
+
+        return $user;
+    }
+
+    private function sharedEntry(User $admin): Entry
+    {
+        $previous = Plugin::getInstance()->getSettings()->allowedSections;
+        Plugin::getInstance()->getSettings()->allowedSections = ['pages', 'sharedBlocks'];
+        $created = Plugin::getInstance()->contentDesigner->createPage([
+            'title' => 'Assistant check shared source',
+            'section' => 'sharedBlocks',
+            'entryType' => 'sharedSections',
+        ], $admin);
+        Plugin::getInstance()->getSettings()->allowedSections = $previous;
+        if (empty($created['ok'])) {
+            throw new \RuntimeException($created['error'] ?? 'Could not create a shared entry.');
+        }
+        $this->elementIds[] = (int)$created['entryId'];
+        $entry = Plugin::getInstance()->contentDesigner->entryFromId((int)$created['entryId'], (int)$created['draftId'], null, $admin);
+        $published = Plugin::getInstance()->contentDesigner->publishDraft($entry, $admin);
+        if (empty($published['ok'])) {
+            throw new \RuntimeException($published['error'] ?? 'Could not publish the shared entry.');
+        }
+        $live = Entry::find()->id((int)$created['entryId'])->status(null)->one();
+        if (!$live instanceof Entry || $live->getIsDraft()) {
+            throw new \RuntimeException('The shared entry is still a draft after publish.');
+        }
+
+        return $live;
+    }
+
+    private function makeUser(bool $admin): User
+    {
+        $user = new User();
+        $user->username = 'assistantcheck' . uniqid();
+        $user->email = $user->username . '@example.com';
+        $user->admin = $admin;
+        $user->active = true;
+        if (!Craft::$app->getUsers()->canCreateUsers()) {
+            $user->id = random_int(1_000_000_000, 2_000_000_000);
+
+            return $user;
+        }
+        if (!Craft::$app->getElements()->saveElement($user)) {
+            throw new \RuntimeException(json_encode($user->getErrors()) ?: 'Could not save the check user.');
+        }
+        $this->userIds[] = (int)$user->id;
+
+        return $user;
+    }
+
+    /**
+     * Solo grants every permission to every user, so denial checks run as Pro.
+     */
+    private function withPermissionChecks(callable $fn): void
+    {
+        $edition = Craft::$app->edition;
+        if ($edition === CmsEdition::Solo) {
+            Craft::$app->edition = CmsEdition::Pro;
+        }
+        try {
+            $fn();
+        } finally {
+            Craft::$app->edition = $edition;
+        }
+    }
+
+    /**
+     * @param array<string, mixed> $payload
+     * @param array<int, array<string, mixed>> $history
+     */
+    private function mockHttp(array $payload, ?array &$history): Client
+    {
+        $history = [];
+        $stack = HandlerStack::create(new MockHandler([
+            new Response(200, ['Content-Type' => 'application/json'], json_encode($payload)),
+        ]));
+        $stack->push(Middleware::history($history));
+
+        return new Client(['handler' => $stack]);
+    }
+
+    /**
+     * @param array<string, mixed> $payload
+     */
+    private function mockHttpStatus(int $status, array $payload): Client
+    {
+        $stack = HandlerStack::create(new MockHandler([
+            new Response($status, ['Content-Type' => 'application/json'], json_encode($payload)),
+        ]));
+
+        return new Client(['handler' => $stack]);
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $history
+     */
+    private function assertClientRequest(OpenAiClient|AnthropicClient $client, string $host, string $model, array &$history, ?array $messages = null): void
+    {
+        $client->complete($messages ?? [['role' => 'user', 'content' => 'hi']], [], $model, 128);
+        $request = $history[0]['request'] ?? null;
+        $body = $request ? json_decode((string)$request->getBody(), true) : [];
+        if (!$request || !str_contains((string)$request->getUri(), $host) || ($body['model'] ?? null) !== $model) {
+            $this->failures[] = "Provider client did not target $host with $model.";
+        }
+    }
+
+    private function withEmptyKey(callable $fn): void
+    {
+        $name = Plugin::getInstance()->getSettings()->apiKeyEnvName();
+        $server = $_SERVER[$name] ?? null;
+        $env = getenv($name);
+        unset($_SERVER[$name]);
+        putenv($name);
+        try {
+            $fn();
+        } finally {
+            if (is_string($server)) {
+                $_SERVER[$name] = $server;
+            }
+            if ($env !== false) {
+                putenv($name . '=' . $env);
+            }
+        }
+    }
+
+    private function projectConfigText(): string
+    {
+        $path = Craft::getAlias('@config/project');
+        $text = '';
+        $iterator = new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($path));
+        foreach ($iterator as $file) {
+            if ($file->isFile() && str_ends_with($file->getFilename(), '.yaml')) {
+                $text .= file_get_contents($file->getPathname());
+            }
+        }
+
+        return $text;
+    }
+
+    private function methodSource(ReflectionMethod $method): string
+    {
+        $lines = file($method->getFileName());
+
+        return implode('', array_slice($lines, $method->getStartLine() - 1, $method->getEndLine() - $method->getStartLine() + 1));
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $types
+     */
+    private function fieldOnType(array $types, string $typeHandle, string $fieldHandle): ?array
+    {
+        foreach ($types as $type) {
+            if ($type['handle'] !== $typeHandle) {
+                continue;
+            }
+            foreach ($type['fields'] as $field) {
+                if ($field['handle'] === $fieldHandle) {
+                    return $field;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private function checkConversations(Plugin $plugin, User $admin): void
+    {
+        $column = Craft::$app->getDb()->getTableSchema(ConversationRecord::tableName())?->getColumn('title');
+        if (!$column || $column->allowNull) {
+            $this->failures[] = 'Conversations are missing a required title column.';
+
+            return;
+        }
+
+        $index = $this->methodSource(new ReflectionMethod(ChatController::class, 'actionIndex'));
+        $panel = $this->methodSource(new ReflectionMethod(ChatController::class, 'actionPanel'));
+        if (str_contains($index, '->open(') || str_contains($panel, '->open(')) {
+            $this->failures[] = 'Opening Chat or the slideout still creates or reuses one conversation.';
+        }
+
+        $ghostId = random_int(1_900_000_000, 2_000_000_000);
+        $beforeGhost = (int)ConversationRecord::find()->where(['userId' => $ghostId])->count();
+        $plugin->conversations->listForUser($ghostId, null, null);
+        if ($beforeGhost !== 0 || (int)ConversationRecord::find()->where(['userId' => $ghostId])->count() !== 0) {
+            $this->failures[] = 'Listing conversations inserted a row.';
+        }
+
+        $alpha = $this->publishedPage($admin, 'Assistant multi chat alpha', 'assistant-multi-alpha-');
+        $beta = $this->publishedPage($admin, 'Assistant multi chat beta', 'assistant-multi-beta-');
+        $siteId = (int)$alpha->siteId;
+        $first = $this->startedConversation($plugin, $admin, $alpha);
+        $second = $this->startedConversation($plugin, $admin, $alpha);
+        $otherEntry = $this->startedConversation($plugin, $admin, $beta);
+        $unbound = $this->startedConversation($plugin, $admin, null);
+        if (!$first || !$second || !$otherEntry || !$unbound) {
+            return;
+        }
+
+        if ((int)$first->draftId === (int)$second->draftId) {
+            $this->failures[] = 'A new chat on an entry reused the other chat draft.';
+        }
+        $firstDraft = Entry::find()->draftId((int)$first->draftId)->status(null)->siteId($siteId)->one();
+        $secondDraft = Entry::find()->draftId((int)$second->draftId)->status(null)->siteId($siteId)->one();
+        if (!$firstDraft || !$secondDraft || $firstDraft->draftName !== 'Mason' || $secondDraft->draftName !== 'Mason 2') {
+            $this->failures[] = 'Entry chats did not get separate Mason draft names.';
+        }
+        if ($first->title !== 'Assistant multi chat alpha' || $otherEntry->title !== 'Assistant multi chat beta') {
+            $this->failures[] = 'A bound conversation did not use the entry title.';
+        }
+
+        $plugin->conversations->addMessage($unbound, 'user', 'Assistant multi chat unbound message');
+        $unbound->refresh();
+        if ($unbound->title !== 'Assistant multi chat unbound message') {
+            $this->failures[] = 'An unbound conversation did not use its first message as the title.';
+        }
+
+        $long = $this->startedConversation($plugin, $admin, null);
+        if ($long) {
+            $plugin->conversations->addMessage($long, 'user', str_repeat('m', 90));
+            $long->refresh();
+            if ($long->title !== str_repeat('m', 80)) {
+                $this->failures[] = 'A long conversation title was not shortened to 80 characters.';
+            }
+        }
+
+        $stored = new ConversationRecord();
+        $stored->userId = $admin->id;
+        $stored->entryId = $alpha->id;
+        $stored->siteId = $siteId;
+        $stored->title = 'New chat';
+        $stored->save(false);
+        $this->conversationIds[] = (int)$stored->id;
+        $plugin->conversations->applyDerivedTitle($stored);
+        $stored->refresh();
+        $empty = new ConversationRecord();
+        $empty->userId = $admin->id;
+        $empty->siteId = $siteId;
+        $empty->title = 'New chat';
+        $empty->save(false);
+        $this->conversationIds[] = (int)$empty->id;
+        $plugin->conversations->applyDerivedTitle($empty);
+        $empty->refresh();
+        if ($stored->title !== 'Assistant multi chat alpha' || $empty->title !== 'New chat') {
+            $this->failures[] = 'Existing conversations did not backfill to the entry title or New chat.';
+        }
+
+        $plugin->conversations->addMessage($first, 'user', 'alpha transcript');
+        $plugin->conversations->addMessage($second, 'user', 'beta transcript');
+        $entryList = $plugin->conversations->listForUser($admin->id, (int)$alpha->id, $siteId);
+        $entryIds = array_map(fn(ConversationRecord $record) => (int)$record->id, $entryList);
+        if (!in_array((int)$first->id, $entryIds, true) || !in_array((int)$second->id, $entryIds, true)) {
+            $this->failures[] = 'Listing an entry collapsed its conversations.';
+        }
+        if (in_array((int)$otherEntry->id, $entryIds, true) || in_array((int)$unbound->id, $entryIds, true)) {
+            $this->failures[] = 'An entry list included another entry or an unbound chat.';
+        }
+        $beforeOpen = count($entryIds);
+        $opened = $plugin->conversations->open($admin->id, (int)$alpha->id, null, $siteId);
+        $afterOpen = count($plugin->conversations->listForUser($admin->id, (int)$alpha->id, $siteId));
+        if ($beforeOpen < 2 || $afterOpen !== $beforeOpen || !in_array((int)$opened->id, $entryIds, true)) {
+            $this->failures[] = 'open() did not leave the separate entry conversations in place.';
+        }
+
+        $allIds = array_map(
+            fn(ConversationRecord $record) => (int)$record->id,
+            $plugin->conversations->listForUser($admin->id, null, null),
+        );
+        foreach ([(int)$first->id, (int)$otherEntry->id, (int)$unbound->id] as $id) {
+            if (!in_array($id, $allIds, true)) {
+                $this->failures[] = 'Chat did not list every conversation owned by the user.';
+                break;
+            }
+        }
+
+        $third = $this->startedConversation($plugin, $admin, null);
+        if ($third && ($plugin->conversations->messagesForUser($third) !== [] || $third->entryId)) {
+            $this->failures[] = 'A new chat reused another transcript or bound an entry.';
+        }
+        if ($plugin->conversations->messagesForUser($first)[0]->content !== 'alpha transcript') {
+            $this->failures[] = 'Starting a new chat changed an older transcript.';
+        }
+
+        $firstView = $plugin->conversations->ownedView((int)$first->id, $admin);
+        $secondView = $plugin->conversations->ownedView((int)$second->id, $admin);
+        $back = $plugin->conversations->ownedView((int)$first->id, $admin);
+        if (
+            !$firstView || !$secondView || !$back
+            || ($firstView['messages'][0]['content'] ?? '') !== 'alpha transcript'
+            || ($secondView['messages'][0]['content'] ?? '') !== 'beta transcript'
+            || ($back['messages'][0]['content'] ?? '') !== 'alpha transcript'
+            || (int)$firstView['draftId'] === (int)$secondView['draftId']
+            || !array_key_exists('previewUrl', $firstView)
+            || !array_key_exists('previewAvailable', $firstView)
+            || empty($firstView['editUrl'])
+            || $firstView['editUrl'] === ($secondView['editUrl'] ?? null)
+        ) {
+            $this->failures[] = 'Switching conversations did not restore that chat’s transcript, preview, and edit link.';
+        }
+
+        $other = $this->makeUser(false);
+        $foreignIds = array_map(
+            fn(ConversationRecord $record) => (int)$record->id,
+            $plugin->conversations->listForUser((int)$other->id, null, null),
+        );
+        if (
+            in_array((int)$first->id, $foreignIds, true)
+            || $plugin->conversations->ownedView((int)$first->id, $other) !== null
+            || $plugin->conversations->deleteOwned((int)$second->id, (int)$other->id)
+            || !ConversationRecord::findOne((int)$second->id)
+        ) {
+            $this->failures[] = 'Another user can list, read, or delete the conversation.';
+        }
+
+        $draftId = (int)$second->draftId;
+        $messageCount = (int)MessageRecord::find()->where(['conversationId' => (int)$second->id])->count();
+        if ($messageCount < 1 || !$plugin->conversations->deleteOwned((int)$second->id, (int)$admin->id)) {
+            $this->failures[] = 'The owner could not delete a conversation.';
+        } elseif (ConversationRecord::findOne((int)$second->id) || MessageRecord::find()->where(['conversationId' => (int)$second->id])->exists()) {
+            $this->failures[] = 'Deleting a conversation left the conversation or its messages.';
+        } elseif (!Entry::find()->draftId($draftId)->status(null)->siteId($siteId)->exists()) {
+            $this->failures[] = 'Deleting a conversation also deleted its draft.';
+        }
+
+        $js = (string)file_get_contents(Plugin::getInstance()->getBasePath() . '/web/assets/assistant/dist/assistant.js');
+        $send = $this->methodSource(new ReflectionMethod(ChatController::class, 'actionSend'));
+        if (!str_contains($js, 'padstone-mason/chat/conversation') || !str_contains($js, 'params: { conversationId: id }') || !str_contains($js, 'setConversationId') || !str_contains($send, 'startFromRequest')) {
+            $this->failures[] = 'The panel script does not load the selected conversation.';
+        }
+        if (!str_contains($js, 'setPending') || !str_contains($js, 'Mason is writing')) {
+            $this->failures[] = 'The panel script does not show a waiting indicator while the model replies.';
+        }
+        $rendered = \craft\helpers\Markdown::process("**Bold**\n\n- one", 'gfm');
+        if (!str_contains($js, "event.key !== 'Enter'") || !str_contains($js, 'event.shiftKey') || !str_contains($js, 'event.metaKey') || !str_contains($js, "setRangeText('\\n'") || !str_contains($js, 'requestSubmit')) {
+            $this->failures[] = 'Enter does not send the prompt.';
+        }
+        if (!str_contains($rendered, '<strong>Bold</strong>') || !str_contains($rendered, '<li>one</li>') || !str_contains($send, 'replyHtml') || !str_contains($js, 'data.messages')) {
+            $this->failures[] = 'Live replies are not rendered as Markdown.';
+        }
+
+        $view = Craft::$app->getView();
+        $mode = $view->getTemplateMode();
+        $view->setTemplateMode(View::TEMPLATE_MODE_CP);
+        try {
+            $allHtml = $view->renderTemplate('padstone-mason/_panel', $this->panelRender(
+                $plugin->conversations->summaries($admin->id, null, null),
+                $unbound,
+                null,
+                null,
+                'all',
+            ));
+            $entryHtml = $view->renderTemplate('padstone-mason/_panel', $this->panelRender(
+                $plugin->conversations->summaries($admin->id, (int)$alpha->id, $siteId),
+                $first,
+                (int)$alpha->id,
+                $siteId,
+                'entry',
+            ));
+            if (
+                !str_contains($allHtml, 'Assistant multi chat alpha')
+                || !str_contains($allHtml, 'Assistant multi chat beta')
+                || !str_contains($allHtml, 'Assistant multi chat unbound message')
+                || !str_contains($allHtml, 'New chat')
+                || !str_contains($allHtml, 'data-assistant-delete')
+                || !str_contains($entryHtml, 'Assistant multi chat alpha')
+                || str_contains($entryHtml, 'Assistant multi chat beta')
+                || str_contains($entryHtml, 'Assistant multi chat unbound message')
+            ) {
+                $this->failures[] = 'Chat and the entry slideout did not list the conversations for their scope.';
+            }
+        } catch (\Throwable $e) {
+            $this->failures[] = 'Could not render the conversation list: ' . $e->getMessage();
+        } finally {
+            $view->setTemplateMode($mode);
+        }
+    }
+
+    private function publishedPage(User $admin, string $title, string $slugPrefix): Entry
+    {
+        $created = Plugin::getInstance()->contentDesigner->createPage([
+            'title' => $title,
+            'section' => 'pages',
+            'entryType' => 'basicPage',
+            'slug' => $slugPrefix . uniqid(),
+        ], $admin);
+        if (empty($created['ok'])) {
+            throw new \RuntimeException($created['error'] ?? 'Could not create a page for the conversation check.');
+        }
+        $this->elementIds[] = (int)$created['entryId'];
+        $draft = Plugin::getInstance()->contentDesigner->entryFromId((int)$created['entryId'], (int)$created['draftId'], null, $admin);
+        $published = Plugin::getInstance()->contentDesigner->publishDraft($draft, $admin);
+        if (empty($published['ok'])) {
+            throw new \RuntimeException($published['error'] ?? 'Could not publish a page for the conversation check.');
+        }
+        $live = Entry::find()->id((int)$created['entryId'])->status(null)->one();
+        if (!$live instanceof Entry || $live->getIsDraft()) {
+            throw new \RuntimeException('The conversation check page was not published.');
+        }
+
+        return $live;
+    }
+
+    private function startedConversation(Plugin $plugin, User $admin, ?Entry $entry): ?ConversationRecord
+    {
+        $started = $plugin->conversations->start($admin->id, $entry, $admin, $entry?->siteId ?? Craft::$app->getSites()->getPrimarySite()->id);
+        if (empty($started['ok']) || !$started['conversation'] instanceof ConversationRecord) {
+            $this->failures[] = 'Could not start a chat: ' . ($started['error'] ?? '');
+
+            return null;
+        }
+        $this->conversationIds[] = (int)$started['conversation']->id;
+
+        return $started['conversation'];
+    }
+
+    /**
+     * @param array<int, array{id: int, title: string, entryId: ?int, draftId: ?int}> $conversations
+     * @return array<string, mixed>
+     */
+    private function panelRender(array $conversations, ConversationRecord $conversation, ?int $entryId, ?int $siteId, string $scope): array
+    {
+        return [
+            'conversation' => $conversation,
+            'conversations' => $conversations,
+            'messages' => [],
+            'previewUrl' => null,
+            'editUrl' => null,
+            'draftNote' => 'Ask for a change. It stays on a draft until you publish it.',
+            'entryId' => $entryId,
+            'siteId' => $siteId,
+            'scope' => $scope,
+        ];
+    }
+
+    private function cleanup(): void
+    {
+        foreach ($this->conversationIds as $id) {
+            $conversation = ConversationRecord::findOne($id);
+            if ($conversation) {
+                $conversation->delete();
+            }
+        }
+        foreach ($this->elementIds as $id) {
+            if (!$id) {
+                continue;
+            }
+            $entries = Entry::find()->id($id)->drafts(null)->status(null)->site('*')->all();
+            foreach ($entries as $entry) {
+                Craft::$app->getElements()->deleteElement($entry, true);
+            }
+        }
+        foreach ($this->userIds as $id) {
+            $user = User::find()->id($id)->status(null)->one();
+            if ($user) {
+                Craft::$app->getElements()->deleteElement($user, true);
+            }
+        }
+    }
+}
+
+class ScriptedClient implements ProviderClient
+{
+    /** @var string[] */
+    public array $models = [];
+
+    public function __construct(private \Closure $handler)
+    {
+    }
+
+    public function complete(array $messages, array $tools, string $model, int $maxTokens): ProviderResult
+    {
+        $this->models[] = $model;
+
+        return ($this->handler)($messages, $tools, $model, $maxTokens);
+    }
+}

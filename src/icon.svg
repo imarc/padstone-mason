@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">Padstone Mason</title>
+  <desc id="desc">Cream masonry trowel above three dimensional building blocks on a deep teal rounded square.</desc>
+  <defs>
+    <linearGradient id="teal" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#00515A"/>
+      <stop offset="1" stop-color="#00434A"/>
+    </linearGradient>
+    <linearGradient id="cream" x1="0" y1="0" x2="0.9" y2="1">
+      <stop stop-color="#FFFDF6"/>
+      <stop offset="1" stop-color="#F1EAE0"/>
+    </linearGradient>
+  </defs>
+  <rect x="70" y="70" width="884" height="884" rx="185" fill="url(#teal)"/>
+  <!-- Left block: consistent isometric top, front and side -->
+  <path d="M215 548 L322 510 Q332 507 343 513 L495 600 Q504 606 497 613 L388 659 Q380 663 370 657 L214 570 Q203 564 215 548Z" fill="url(#cream)"/>
+  <path d="M208 561 L379 659 L379 789 Q379 804 365 797 L224 717 Q208 709 208 691Z" fill="#E8DFD3"/>
+  <path d="M379 659 L500 609 L500 723 Q500 738 488 744 L379 797Z" fill="#D7CCBE"/>
+  <!-- Right upper block -->
+  <path d="M455 555 L657 487 Q670 483 680 489 L790 543 Q801 549 790 556 L578 627 Q569 630 559 625Z" fill="url(#cream)"/>
+  <path d="M455 555 L568 624 L568 687 Q568 700 580 696 L790 625 Q801 622 801 609 L801 548 L568 627Z" fill="#E4DACC"/>
+  <path d="M568 627 L801 548 L801 609 Q801 622 790 625 L580 696 Q568 700 568 687Z" fill="#DDD2C5"/>
+  <!-- Lower long block -->
+  <path d="M480 726 L790 648 Q801 645 810 651 L821 660 L505 750Z" fill="#FFFCF5"/>
+  <path d="M477 736 Q477 727 488 724 L790 648 Q807 644 807 660 L807 744 Q807 759 791 763 L495 840 Q477 843 477 826Z" fill="url(#cream)"/>
+  <path d="M477 736 L505 751 L505 840 L488 835 Q477 831 477 818Z" fill="#E2D7C9"/>
+  <!-- Trowel blade, blade thickness, stem and handle -->
+  <path d="M397 484 L546 333 Q559 321 574 328 L665 377 Q678 385 672 396 L414 502 Q393 509 387 497 Q383 490 397 484Z" fill="#D7CDBF"/>
+  <path d="M397 473 L546 321 Q559 308 574 316 L665 365 Q678 372 672 385 L414 491 Q393 500 387 486 Q384 480 397 473Z" fill="url(#cream)"/>
+  <path d="M622 344 L622 276 Q622 263 633 254 L752 157 Q767 146 781 157 L791 169 Q799 182 787 195 L674 289 Q666 294 657 287 L651 283 Q644 278 644 291 L644 360Z" fill="#DCD2C5"/>
+  <path d="M615 335 L615 267 Q615 254 627 245 L745 148 Q761 135 776 148 L786 160 Q795 174 782 185 L667 279 Q657 287 649 279 L643 274 Q636 269 636 283 L636 351Z" fill="url(#cream)"/>
+</svg>

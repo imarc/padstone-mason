@@ -1,0 +1,47 @@
+{% extends "_layouts/cp" %}
+{% import "_includes/forms" as forms %}
+{% set title = "Ask Mason usage" %}
+{% set selectedSubnavItem = "usage" %}
+
+{% block content %}
+    <form method="get">
+        {{ forms.dateField({
+            label: "From",
+            name: "from",
+            value: from
+        }) }}
+        {{ forms.dateField({
+            label: "To",
+            name: "to",
+            value: to
+        }) }}
+        <button type="submit" class="btn submit">Show usage</button>
+    </form>
+
+    <table class="data fullwidth">
+        <thead>
+            <tr>
+                <th>User</th>
+                <th>Provider</th>
+                <th>Model</th>
+                <th>Prompt tokens</th>
+                <th>Completion tokens</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in rows %}
+                <tr>
+                    <td>{{ row.username }}</td>
+                    <td>{{ row.provider }}</td>
+                    <td>{{ row.model }}</td>
+                    <td>{{ row.promptTokens }}</td>
+                    <td>{{ row.completionTokens }}</td>
+                </tr>
+            {% else %}
+                <tr>
+                    <td colspan="5">No usage in that range.</td>
+                </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+{% endblock %}

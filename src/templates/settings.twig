@@ -1,0 +1,49 @@
+{% import "_includes/forms" as forms %}
+
+{{ forms.lightswitchField({
+    label: "Enabled",
+    name: "enabled",
+    on: settings.enabled,
+    instructions: "Turn this off to hide the assistant. Settings stay available so you can turn it back on."
+}) }}
+
+{{ forms.selectField({
+    label: "Provider",
+    name: "provider",
+    options: [
+        {label: "OpenAI", value: "openai"},
+        {label: "Anthropic", value: "anthropic"}
+    ],
+    value: settings.provider,
+    instructions: "API keys are read from OPENAI_API_KEY and ANTHROPIC_API_KEY in the environment. They are not stored here."
+}) }}
+
+{{ forms.textField({
+    label: "Default model",
+    name: "defaultModel",
+    value: settings.defaultModel,
+    required: true
+}) }}
+
+{{ forms.textareaField({
+    label: "Extra instruction",
+    name: "extraInstruction",
+    value: settings.extraInstruction,
+    rows: 4,
+    instructions: "Optional note added to the assistant's instructions."
+}) }}
+
+{{ forms.textField({
+    label: "Maximum output length",
+    name: "maxOutputTokens",
+    value: settings.maxOutputTokens,
+    type: "number"
+}) }}
+
+{{ forms.textareaField({
+    label: "Sections the assistant may create",
+    name: "allowedSections",
+    value: settings.allowedSectionsText(),
+    rows: 5,
+    instructions: "One section handle per line. Leave this empty to refuse page creation. Editing an existing Content Designer entry is still allowed."
+}) }}
