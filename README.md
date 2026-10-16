@@ -32,6 +32,8 @@ Turn **Enabled** off to hide the assistant. The settings screen stays available.
 - **New chat** starts an empty transcript. On an entry, it also creates a separate draft so chats do not edit each other.
 - **Delete** removes the chat and its messages. The draft stays in place.
 - **Publish** applies the draft. Craft’s own view, save, and create permissions still apply.
+- **Unpublish** disables the live entry when you ask. The chat stays bound to it.
+- **Delete** moves the entry to the trash when you ask, and clears that chat’s binding. Craft’s delete permission still applies.
 - **Padstone Mason → Usage** (admins) totals prompt and completion tokens by user, provider, and model for a date range. Rows are written only when the provider reports usage. Message text and API keys are not stored.
 
 Each person only sees their own chats. The assistant does not read unsaved changes in the entry form.

@@ -147,6 +147,33 @@ class Assistant extends Component
         return $result;
     }
 
+    public function unpublish(ConversationRecord $conversation, User $user): array
+    {
+        $entry = $this->boundDraft($conversation, $user);
+        if (!$entry) {
+            return ['ok' => false, 'saved' => false, 'error' => 'No entry is bound to this conversation.'];
+        }
+
+        return Plugin::getInstance()->contentDesigner->unpublishEntry($entry, $user);
+    }
+
+    public function deleteEntry(ConversationRecord $conversation, User $user): array
+    {
+        $entry = $this->boundDraft($conversation, $user);
+        if (!$entry) {
+            return ['ok' => false, 'saved' => false, 'error' => 'No entry is bound to this conversation.'];
+        }
+
+        $result = Plugin::getInstance()->contentDesigner->deleteEntry($entry, $user);
+        if (!empty($result['ok'])) {
+            $conversation->entryId = null;
+            $conversation->draftId = null;
+            $conversation->save(false);
+        }
+
+        return $result;
+    }
+
     /**
      * @return array<int, array{name: string, description: string, parameters: array<string, mixed>}>
      */
@@ -244,6 +271,16 @@ class Assistant extends Component
                 'description' => 'Publish the bound draft. Call this only when the user explicitly asks to publish.',
                 'parameters' => $object + ['properties' => new \stdClass()],
             ],
+            [
+                'name' => 'unpublish_entry',
+                'description' => 'Disable the live entry bound to this conversation so it is no longer public. Call this only when the user explicitly asks to unpublish. The entry and this conversation binding stay in place.',
+                'parameters' => $object + ['properties' => new \stdClass()],
+            ],
+            [
+                'name' => 'delete_entry',
+                'description' => 'Move the entry bound to this conversation to the trash. Call this only when the user explicitly asks to delete. This clears the conversation binding. The previous draft is removed with the entry.',
+                'parameters' => $object + ['properties' => new \stdClass()],
+            ],
         ];
     }
 
@@ -270,6 +307,8 @@ class Assistant extends Component
             'rebind_entry' => $this->rebind($arguments, $conversation, $user),
             'find_elements' => $service->findElements((string)($arguments['kind'] ?? 'entry'), (string)($arguments['title'] ?? ''), $user),
             'publish_draft' => $this->publish($conversation, $user),
+            'unpublish_entry' => $this->unpublish($conversation, $user),
+            'delete_entry' => $this->deleteEntry($conversation, $user),
             default => ['ok' => false, 'saved' => false, 'error' => 'The change was not saved. That action is not available.'],
         };
     }
@@ -570,6 +609,7 @@ class Assistant extends Component
             'Edits stay on a draft until publish_draft is called.',
             'Publishing keeps this conversation bound to the same entry. A missing draft id means the live entry is still bound, and the next edit starts a new draft of it.',
             'To edit an existing entry, call find_elements and then rebind_entry with its id. If more than one entry matches, ask the admin which id to use. Do not say rebinding is unavailable, and do not call create_page for an entry that already exists.',
+            'Call unpublish_entry or delete_entry only when the user explicitly asks to unpublish or delete. Unpublish disables the live entry and keeps this conversation bound to it. Delete moves the entry to the trash and clears the binding.',
             'When a request does not identify exactly one allowed section and exactly one entry type on that section, ask the admin which to use and include the sections and entry types below. Do not say the request is impossible or a project config change. Do not call create_page until the admin has identified one section and one entry type.',
             'A tool result that says to ask the admin is a question for them, not a final failure. Include the sections it returned.',
             'Allowed sections and entry types:',

@@ -61,6 +61,7 @@ class CheckController extends Controller
             $this->checkPermissions($plugin, $admin);
             $this->checkProviders($plugin);
             $this->checkEditing($plugin, $admin);
+            $this->checkUnpublishAndDelete($plugin, $admin);
             $this->checkAssistantLoop($plugin, $admin);
             $this->checkConversations($plugin, $admin);
             $this->checkUsage($plugin, $admin);
@@ -1345,6 +1346,124 @@ class CheckController extends Controller
         }
     }
 
+    private function checkUnpublishAndDelete(Plugin $plugin, User $admin): void
+    {
+        Craft::$app->getUser()->setIdentity($admin);
+        $names = array_column($plugin->assistant->tools(), 'name');
+        $prompt = (new ReflectionMethod($plugin->assistant, 'systemPrompt'))->invoke(
+            $plugin->assistant,
+            new ConversationRecord(),
+            $admin,
+        );
+        if (!in_array('unpublish_entry', $names, true) || !in_array('delete_entry', $names, true) || !is_string($prompt) || !str_contains($prompt, 'only when the user explicitly asks to unpublish or delete')) {
+            $this->failures[] = 'Unpublish and delete are not limited to an explicit request.';
+        }
+
+        $viewer = $this->viewer($admin);
+        try {
+            $page = $this->publishedPage($admin, 'Assistant check unpublish', 'assistant-check-unpublish-');
+        } catch (\Throwable $e) {
+            $this->failures[] = $e->getMessage();
+
+            return;
+        }
+        $chat = $this->startedConversation($plugin, $admin, $page);
+        if (!$chat) {
+            return;
+        }
+
+        $this->withPermissionChecks(function () use ($plugin, $viewer, $page): void {
+            if (!in_array((int)$viewer->id, $this->userIds, true)) {
+                return;
+            }
+            Craft::$app->getUser()->setIdentity($viewer);
+            $denied = $plugin->contentDesigner->unpublishEntry($page, $viewer);
+            if (!empty($denied['ok'])) {
+                $this->failures[] = 'A view-only user unpublished an entry.';
+            }
+        });
+        Craft::$app->getUser()->setIdentity($admin);
+        $page = Entry::find()->id((int)$page->id)->status(null)->one();
+        if (!$page instanceof Entry || !$page->enabled) {
+            $this->failures[] = 'A denied unpublish changed the entry.';
+
+            return;
+        }
+
+        $unpublished = $plugin->assistant->execute('unpublish_entry', [], $chat, $admin);
+        $chat->refresh();
+        $page = Entry::find()->id((int)$page->id)->status(null)->one();
+        if (empty($unpublished['ok']) || !$page instanceof Entry || $page->enabled || (int)$chat->entryId !== (int)$page->id) {
+            $this->failures[] = 'Unpublishing did not disable the live entry: ' . ($unpublished['error'] ?? '');
+
+            return;
+        }
+        $again = $plugin->assistant->execute('unpublish_entry', [], $chat, $admin);
+        if (empty($again['ok']) || empty($again['alreadyUnpublished'])) {
+            $this->failures[] = 'Unpublishing an offline entry was treated as a new change.';
+        }
+
+        try {
+            $doomed = $this->publishedPage($admin, 'Assistant check delete', 'assistant-check-delete-');
+        } catch (\Throwable $e) {
+            $this->failures[] = $e->getMessage();
+
+            return;
+        }
+        $deleteChat = $this->startedConversation($plugin, $admin, $doomed);
+        if (!$deleteChat) {
+            return;
+        }
+        $this->withPermissionChecks(function () use ($plugin, $viewer, $doomed): void {
+            if (!in_array((int)$viewer->id, $this->userIds, true)) {
+                return;
+            }
+            Craft::$app->getUser()->setIdentity($viewer);
+            $denied = $plugin->contentDesigner->deleteEntry($doomed, $viewer);
+            if (!empty($denied['ok'])) {
+                $this->failures[] = 'A view-only user deleted an entry.';
+            }
+        });
+        Craft::$app->getUser()->setIdentity($admin);
+        if (!Entry::find()->id((int)$doomed->id)->status(null)->exists()) {
+            $this->failures[] = 'A denied delete removed the entry.';
+
+            return;
+        }
+
+        $deleted = $plugin->assistant->execute('delete_entry', [], $deleteChat, $admin);
+        $deleteChat->refresh();
+        $live = Entry::find()->id((int)$doomed->id)->status(null)->one();
+        $trashed = Entry::find()->id((int)$doomed->id)->status(null)->trashed(true)->one();
+        if (empty($deleted['ok']) || $deleteChat->entryId || $deleteChat->draftId || $live || !$trashed) {
+            $this->failures[] = 'Deleting did not move the entry to the trash and clear the binding: ' . ($deleted['error'] ?? '');
+        }
+
+        $draft = $plugin->contentDesigner->createPage([
+            'title' => 'Assistant check unpublished draft',
+            'section' => 'pages',
+            'entryType' => 'basicPage',
+            'slug' => 'assistant-check-unpublished-draft-' . uniqid(),
+        ], $admin);
+        if (empty($draft['ok'])) {
+            $this->failures[] = 'Could not create an unpublished draft for the unpublish check: ' . ($draft['error'] ?? '');
+
+            return;
+        }
+        $this->elementIds[] = (int)$draft['entryId'];
+        $draftChat = $plugin->conversations->open($admin->id, (int)$draft['entryId'], (int)$draft['draftId'], Craft::$app->getSites()->getPrimarySite()->id);
+        $this->conversationIds[] = (int)$draftChat->id;
+        $notLive = $plugin->assistant->execute('unpublish_entry', [], $draftChat, $admin);
+        if (!empty($notLive['ok'])) {
+            $this->failures[] = 'Unpublish accepted an entry that was never published.';
+        }
+
+        $empty = $this->startedConversation($plugin, $admin, null);
+        if ($empty && (!empty($plugin->assistant->execute('unpublish_entry', [], $empty, $admin)['ok']) || !empty($plugin->assistant->execute('delete_entry', [], $empty, $admin)['ok']))) {
+            $this->failures[] = 'Unpublish or delete ran without a bound entry.';
+        }
+    }
+
     private function publishedPage(User $admin, string $title, string $slugPrefix): Entry
     {
         $created = Plugin::getInstance()->contentDesigner->createPage([
@@ -1414,7 +1533,7 @@ class CheckController extends Controller
             if (!$id) {
                 continue;
             }
-            $entries = Entry::find()->id($id)->drafts(null)->status(null)->site('*')->all();
+            $entries = Entry::find()->id($id)->drafts(null)->status(null)->trashed(null)->site('*')->all();
             foreach ($entries as $entry) {
                 Craft::$app->getElements()->deleteElement($entry, true);
             }

@@ -560,6 +560,90 @@ class ContentDesigner extends Component
         });
     }
 
+    public function unpublishEntry(Entry $entry, ?User $user): array
+    {
+        if (!$user) {
+            return $this->fail('You need to be signed in.');
+        }
+
+        $canonical = $entry->getCanonical(true);
+        if (!$canonical instanceof Entry || !Craft::$app->getElements()->canView($canonical, $user)) {
+            return $this->fail('That entry was not found.');
+        }
+        if ($canonical->getIsDraft() || $canonical->getIsRevision()) {
+            return $this->fail('That entry is not published.');
+        }
+        if (!Craft::$app->getElements()->canSave($canonical, $user)) {
+            return $this->fail('You do not have permission to unpublish that entry.');
+        }
+
+        $siteOnly = Entry::isLocalized() && Craft::$app->getIsMultiSite() && count($canonical->getSupportedSites()) !== 1;
+        if ($siteOnly ? !$canonical->getEnabledForSite() : !$canonical->enabled) {
+            return [
+                'ok' => true,
+                'saved' => true,
+                'unpublished' => true,
+                'alreadyUnpublished' => true,
+                'entryId' => (int)$canonical->id,
+                'title' => (string)$canonical->title,
+            ];
+        }
+
+        return $this->mutate(function() use ($canonical, $siteOnly) {
+            if ($siteOnly) {
+                $canonical->setEnabledForSite(false);
+            } else {
+                $canonical->enabled = false;
+            }
+            if (!Craft::$app->getElements()->saveElement($canonical)) {
+                return $this->fail($this->errorText($canonical), $canonical->getErrors());
+            }
+
+            $saved = $this->reload($canonical);
+
+            return [
+                'ok' => true,
+                'saved' => true,
+                'unpublished' => true,
+                'entryId' => (int)$saved->id,
+                'title' => (string)$saved->title,
+                'editUrl' => $saved->getCpEditUrl(),
+            ];
+        });
+    }
+
+    public function deleteEntry(Entry $entry, ?User $user): array
+    {
+        if (!$user) {
+            return $this->fail('You need to be signed in.');
+        }
+
+        $canonical = $entry->getCanonical(true);
+        if (!$canonical instanceof Entry || !Craft::$app->getElements()->canView($canonical, $user)) {
+            return $this->fail('That entry was not found.');
+        }
+        if (!Craft::$app->getElements()->canDelete($canonical, $user)) {
+            return $this->fail('You do not have permission to delete that entry.');
+        }
+
+        $entryId = (int)$canonical->id;
+        $title = (string)$canonical->title;
+
+        return $this->mutate(function() use ($canonical, $entryId, $title) {
+            if (!Craft::$app->getElements()->deleteElement($canonical)) {
+                return $this->fail('Could not delete that entry.');
+            }
+
+            return [
+                'ok' => true,
+                'saved' => true,
+                'deleted' => true,
+                'entryId' => $entryId,
+                'title' => $title,
+            ];
+        });
+    }
+
     public function findElements(string $kind, string $title, ?User $user): array
     {
         if (!$user) {
