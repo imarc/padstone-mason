@@ -1643,6 +1643,8 @@ class CheckController extends Controller
             'assets' => [],
             'previewUrl' => null,
             'editUrl' => null,
+            'boundTitle' => null,
+            'boundIsDraft' => false,
             'draftNote' => 'Ask for a change. It stays on a draft until you publish it.',
             'entryId' => $entryId,
             'siteId' => $siteId,

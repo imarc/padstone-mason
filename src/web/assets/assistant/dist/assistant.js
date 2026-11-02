@@ -157,6 +157,81 @@
     });
   }
 
+  function setBoundBadge(root, data) {
+    const badge = root.querySelector('[data-assistant-bound]');
+    if (!badge) {
+      return;
+    }
+
+    const title = data && Object.prototype.hasOwnProperty.call(data, 'boundTitle')
+      ? (data.boundTitle || '')
+      : (root.getAttribute('data-bound-title') || '');
+    const isDraft = data && Object.prototype.hasOwnProperty.call(data, 'boundIsDraft')
+      ? !!data.boundIsDraft
+      : root.getAttribute('data-bound-draft') === '1';
+    const editUrl = data && Object.prototype.hasOwnProperty.call(data, 'editUrl')
+      ? (data.editUrl || '')
+      : (root.getAttribute('data-edit-url') || '');
+
+    const label = badge.querySelector('.padstone-mason__bound-label');
+    let titleNode = badge.querySelector('[data-assistant-bound-title]');
+    const state = badge.querySelector('[data-assistant-bound-state]');
+
+    if (title) {
+      badge.removeAttribute('data-empty');
+      root.setAttribute('data-bound-title', title);
+      if (isDraft) {
+        root.setAttribute('data-bound-draft', '1');
+      } else {
+        root.removeAttribute('data-bound-draft');
+      }
+      if (label) {
+        label.textContent = 'Bound page';
+      }
+      if (titleNode) {
+        if (editUrl && titleNode.tagName !== 'A') {
+          const link = document.createElement('a');
+          link.className = titleNode.className;
+          link.dataset.assistantBoundTitle = '';
+          titleNode.replaceWith(link);
+          titleNode = link;
+        } else if (!editUrl && titleNode.tagName === 'A') {
+          const span = document.createElement('span');
+          span.className = titleNode.className;
+          span.dataset.assistantBoundTitle = '';
+          titleNode.replaceWith(span);
+          titleNode = span;
+        }
+        titleNode.hidden = false;
+        titleNode.textContent = title;
+        if (titleNode.tagName === 'A') {
+          titleNode.href = editUrl;
+        }
+      }
+      if (state) {
+        state.hidden = !isDraft;
+      }
+      return;
+    }
+
+    badge.setAttribute('data-empty', 'true');
+    root.removeAttribute('data-bound-title');
+    root.removeAttribute('data-bound-draft');
+    if (label) {
+      label.textContent = 'No page bound';
+    }
+    if (titleNode) {
+      titleNode.hidden = true;
+      titleNode.textContent = '';
+      if (titleNode.tagName === 'A') {
+        titleNode.removeAttribute('href');
+      }
+    }
+    if (state) {
+      state.hidden = true;
+    }
+  }
+
   function applyConversation(root, data) {
     const id = data.conversationId || '';
     if (data.conversations) {
@@ -173,6 +248,7 @@
     }
     clearAttachments(root);
     showPreview(root, data);
+    setBoundBadge(root, data);
   }
 
   function setPending(root, pending) {
@@ -353,8 +429,13 @@
     }
     if (data.editUrl) {
       root.setAttribute('data-edit-url', data.editUrl);
+    } else if (Object.prototype.hasOwnProperty.call(data, 'editUrl')) {
+      root.removeAttribute('data-edit-url');
     }
     syncPreviewButton(root);
+    if (Object.prototype.hasOwnProperty.call(data, 'boundTitle') || Object.prototype.hasOwnProperty.call(data, 'boundIsDraft')) {
+      setBoundBadge(root, data);
+    }
     const element = document.querySelector('[data-assistant-drawer]');
     if (element && !element.hidden && root.getAttribute('data-preview-url')) {
       openDrawer(root);
@@ -570,6 +651,7 @@
       }
     }).then(function(response) {
       appendMessage(root, 'assistant', response.data.reply || 'The change was not saved.');
+      showPreview(root, response.data);
     }).catch(function() {
       appendMessage(root, 'assistant', 'The change was not saved.');
     });

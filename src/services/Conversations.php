@@ -206,7 +206,7 @@ class Conversations extends Component
     }
 
     /**
-     * @return array{ok: true, conversationId: int, title: string, entryId: ?int, draftId: ?int, messages: array<int, array{role: string, content: string, html: string, assets: array<int, array{id: int, title: string, filename: string, thumbUrl: ?string, url: ?string}>}>, assets: array<int, array{id: int, title: string, filename: string, thumbUrl: ?string, url: ?string}>, previewUrl: ?string, previewAvailable: bool, editUrl: ?string}|null
+     * @return array{ok: true, conversationId: int, title: string, entryId: ?int, draftId: ?int, boundTitle: ?string, boundIsDraft: bool, messages: array<int, array{role: string, content: string, html: string, assets: array<int, array{id: int, title: string, filename: string, thumbUrl: ?string, url: ?string}>}>, assets: array<int, array{id: int, title: string, filename: string, thumbUrl: ?string, url: ?string}>, previewUrl: ?string, previewAvailable: bool, editUrl: ?string}|null
      */
     public function ownedView(int $id, User $user): ?array
     {
@@ -216,6 +216,7 @@ class Conversations extends Component
         }
 
         $preview = $this->previewFor($conversation, $user);
+        $bound = $this->boundMeta($conversation, $user);
         $media = Plugin::getInstance()->conversationAssets;
         $messages = [];
         foreach ($this->messagesForUser($conversation) as $message) {
@@ -234,6 +235,8 @@ class Conversations extends Component
             'title' => (string)$conversation->title,
             'entryId' => $conversation->entryId ? (int)$conversation->entryId : null,
             'draftId' => $conversation->draftId ? (int)$conversation->draftId : null,
+            'boundTitle' => $bound['boundTitle'],
+            'boundIsDraft' => $bound['boundIsDraft'],
             'messages' => $messages,
             'assets' => $media->summariesForConversation((int)$conversation->id),
             'previewUrl' => $preview['previewUrl'],
@@ -391,6 +394,33 @@ class Conversations extends Component
         $title = trim((string)$entry->title);
 
         return $title === '' ? null : $this->trimTitle($title);
+    }
+
+    /**
+     * @return array{boundTitle: ?string, boundIsDraft: bool}
+     */
+    private function boundMeta(ConversationRecord $conversation, User $user): array
+    {
+        if (!$conversation->entryId && !$conversation->draftId) {
+            return ['boundTitle' => null, 'boundIsDraft' => false];
+        }
+
+        $entry = Plugin::getInstance()->contentDesigner->entryFromId(
+            $conversation->entryId ? (int)$conversation->entryId : null,
+            $conversation->draftId ? (int)$conversation->draftId : null,
+            $conversation->siteId ? (int)$conversation->siteId : null,
+            $user,
+        );
+        if (!$entry instanceof Entry) {
+            return ['boundTitle' => null, 'boundIsDraft' => false];
+        }
+
+        $title = trim((string)$entry->title);
+
+        return [
+            'boundTitle' => $title !== '' ? $title : 'Untitled',
+            'boundIsDraft' => $entry->getIsDraft() && !$entry->isProvisionalDraft,
+        ];
     }
 
     /**

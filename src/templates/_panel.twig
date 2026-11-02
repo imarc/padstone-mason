@@ -7,7 +7,24 @@
     {% if siteId %}data-site-id="{{ siteId }}"{% endif %}
     {% if previewUrl %}data-preview-url="{{ previewUrl }}"{% endif %}
     {% if editUrl %}data-edit-url="{{ editUrl }}"{% endif %}
+    {% if boundTitle %}data-bound-title="{{ boundTitle|e('html_attr') }}"{% endif %}
+    {% if boundIsDraft %}data-bound-draft="1"{% endif %}
 >
+    <div class="padstone-mason__bound" data-assistant-bound{% if not boundTitle %} data-empty="true"{% endif %}>
+        <span class="padstone-mason__bound-label">{% if boundTitle %}Bound page{% else %}No page bound{% endif %}</span>
+        {% if boundTitle %}
+            {% if editUrl %}
+                <a class="padstone-mason__bound-title" data-assistant-bound-title href="{{ editUrl }}">{{ boundTitle }}</a>
+            {% else %}
+                <span class="padstone-mason__bound-title" data-assistant-bound-title>{{ boundTitle }}</span>
+            {% endif %}
+            <span class="padstone-mason__bound-state" data-assistant-bound-state{% if not boundIsDraft %} hidden{% endif %}>Draft</span>
+        {% else %}
+            <span class="padstone-mason__bound-title" data-assistant-bound-title hidden></span>
+            <span class="padstone-mason__bound-state" data-assistant-bound-state hidden>Draft</span>
+        {% endif %}
+    </div>
+
     <div class="padstone-mason__layout">
         <aside class="padstone-mason__list" aria-label="Chats">
             <button type="button" class="btn" data-assistant-new>New chat</button>

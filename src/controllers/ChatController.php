@@ -188,6 +188,19 @@ class ChatController extends Controller
             $result['messages'] = $messages;
         }
         $result['assets'] = $view['assets'] ?? [];
+        $result['boundTitle'] = $view['boundTitle'] ?? null;
+        $result['boundIsDraft'] = (bool)($view['boundIsDraft'] ?? false);
+        if ($view) {
+            $result['entryId'] = $view['entryId'] ?? $result['entryId'] ?? null;
+            $result['draftId'] = $view['draftId'] ?? $result['draftId'] ?? null;
+            if (!empty($view['editUrl'])) {
+                $result['editUrl'] = $view['editUrl'];
+            }
+            if (array_key_exists('previewUrl', $view)) {
+                $result['previewUrl'] = $view['previewUrl'];
+                $result['previewAvailable'] = (bool)($view['previewAvailable'] ?? false);
+            }
+        }
 
         return $this->asJson($result);
     }
@@ -251,6 +264,16 @@ class ChatController extends Controller
         }
         Plugin::getInstance()->conversations->addMessage($conversation, 'assistant', $reply);
         $result['reply'] = $reply;
+        $view = Plugin::getInstance()->conversations->ownedView((int)$conversation->id, $user);
+        if ($view) {
+            $result['boundTitle'] = $view['boundTitle'];
+            $result['boundIsDraft'] = $view['boundIsDraft'];
+            $result['entryId'] = $view['entryId'];
+            $result['draftId'] = $view['draftId'];
+            $result['editUrl'] = $view['editUrl'];
+            $result['previewUrl'] = $view['previewUrl'];
+            $result['previewAvailable'] = $view['previewAvailable'];
+        }
 
         return $this->asJson($result);
     }
@@ -281,6 +304,8 @@ class ChatController extends Controller
             'conversationId' => null,
             'messages' => [],
             'assets' => [],
+            'boundTitle' => null,
+            'boundIsDraft' => false,
             'previewUrl' => null,
             'previewAvailable' => false,
             'editUrl' => null,
@@ -391,6 +416,8 @@ class ChatController extends Controller
             'previewUrl' => $preview['previewUrl'] ?? null,
             'previewAvailable' => $preview['previewAvailable'] ?? false,
             'editUrl' => $preview['editUrl'] ?? null,
+            'boundTitle' => $preview['boundTitle'] ?? null,
+            'boundIsDraft' => (bool)($preview['boundIsDraft'] ?? false),
             'draftNote' => $draftNote,
             'entryId' => $entryId,
             'siteId' => $siteId,
