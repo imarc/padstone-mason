@@ -61,19 +61,20 @@
                 {% endfor %}
             </div>
 
-            <form class="padstone-mason__form" data-assistant-form>
+            {# Div, not form: CpScreenSlideout is already a <form>, and nested forms are ignored by the browser. #}
+            <div class="padstone-mason__form" data-assistant-form>
                 <input type="hidden" name="conversationId" value="{{ conversation.id ?? '' }}">
                 <textarea name="message" rows="4" placeholder="Describe the page change, or paste an image URL"></textarea>
                 <div class="padstone-mason__attachments" data-assistant-attachments hidden></div>
                 <div class="padstone-mason__actions">
                     <button type="button" class="btn" data-assistant-attach>Attach image</button>
                     <input type="file" name="images[]" accept="image/*" multiple hidden data-assistant-file>
-                    <button type="submit" class="btn submit">Send</button>
+                    <button type="button" class="btn submit" data-assistant-send>Send</button>
                     <span class="padstone-mason__hint">Enter to send, Shift+Enter or ⌘+Enter for a new line</span>
                     <button type="button" class="btn" data-assistant-publish>Publish draft</button>
                     <button type="button" class="btn" data-assistant-preview-toggle {% if not previewUrl %}hidden{% endif %} aria-expanded="false">Preview</button>
                 </div>
-            </form>
+            </div>
         </div>
     </div>
 </div>

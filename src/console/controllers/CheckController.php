@@ -1319,7 +1319,7 @@ class CheckController extends Controller
             $this->failures[] = 'The panel does not upload or import conversation images.';
         }
         $rendered = \craft\helpers\Markdown::process("**Bold**\n\n- one", 'gfm');
-        if (!str_contains($js, "event.key !== 'Enter'") || !str_contains($js, 'event.shiftKey') || !str_contains($js, 'event.metaKey') || !str_contains($js, "setRangeText('\\n'") || !str_contains($js, 'requestSubmit')) {
+        if (!str_contains($js, "event.key !== 'Enter'") || !str_contains($js, 'event.shiftKey') || !str_contains($js, 'event.metaKey') || !str_contains($js, "setRangeText('\\n'") || !str_contains($js, 'sendMessage') || !str_contains($js, 'data-assistant-send')) {
             $this->failures[] = 'Enter does not send the prompt.';
         }
         if (!str_contains($rendered, '<strong>Bold</strong>') || !str_contains($rendered, '<li>one</li>') || !str_contains($send, 'replyHtml') || !str_contains($js, 'data.messages')) {

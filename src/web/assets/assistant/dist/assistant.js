@@ -257,7 +257,7 @@
     if (existing) {
       existing.remove();
     }
-    const submit = root.querySelector('[data-assistant-form] button[type="submit"]');
+    const submit = root.querySelector('[data-assistant-send]');
     if (submit) {
       submit.disabled = pending;
     }
@@ -471,7 +471,9 @@
       return;
     }
     event.preventDefault();
+    // containerElement must not be "form": that adds a Save button which POSTs to /admin with no action.
     new Craft.CpScreenSlideout('padstone-mason/chat/panel', {
+      containerElement: 'div',
       params: {
         entryId: button.getAttribute('data-entry-id'),
         draftId: button.getAttribute('data-draft-id') || null,
@@ -479,6 +481,45 @@
       }
     });
   });
+
+  function sendMessage(root) {
+    const form = root.querySelector('[data-assistant-form]');
+    if (!form) {
+      return;
+    }
+    const field = form.querySelector('textarea');
+    const message = field ? field.value.trim() : '';
+    const files = filesFor(root).slice();
+    if (!message && !files.length) {
+      return;
+    }
+    if (root.querySelector('[data-assistant-pending]')) {
+      return;
+    }
+    appendMessage(root, 'user', message || ('Attached ' + files.length + (files.length === 1 ? ' image.' : ' images.')), null, files.map(function(file) {
+      return { id: '', title: file.name, filename: file.name, thumbUrl: null };
+    }));
+    if (field) {
+      field.value = '';
+    }
+    clearAttachments(root);
+    setPending(root, true);
+    Craft.sendActionRequest('POST', 'padstone-mason/chat/send', buildSendPayload(root, message, files)).then(function(response) {
+      setPending(root, false);
+      const data = response.data;
+      if (data.conversationId) {
+        if (data.conversations) {
+          renderConversations(root, data.conversations, data.conversationId);
+        }
+        setConversationId(root, data.conversationId);
+      }
+      showReply(root, data);
+      showPreview(root, data);
+    }).catch(function() {
+      setPending(root, false);
+      appendMessage(root, 'assistant', 'The change was not saved.');
+    });
+  }
 
   document.addEventListener('keydown', function(event) {
     const field = event.target.closest && event.target.closest('[data-assistant-form] textarea');
@@ -496,11 +537,7 @@
       return;
     }
     event.preventDefault();
-    if (typeof field.form.requestSubmit === 'function') {
-      field.form.requestSubmit();
-    } else {
-      field.form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
-    }
+    sendMessage(rootFrom(field));
   });
 
   document.addEventListener('change', function(event) {
@@ -520,45 +557,14 @@
     renderAttachments(root);
   });
 
-  document.addEventListener('submit', function(event) {
-    const form = event.target.closest('[data-assistant-form]');
-    if (!form) {
-      return;
-    }
-    event.preventDefault();
-    const root = rootFrom(form);
-    const message = form.querySelector('textarea').value.trim();
-    const files = filesFor(root).slice();
-    if (!message && !files.length) {
-      return;
-    }
-    if (root.querySelector('[data-assistant-pending]')) {
-      return;
-    }
-    appendMessage(root, 'user', message || ('Attached ' + files.length + (files.length === 1 ? ' image.' : ' images.')), null, files.map(function(file) {
-      return { id: '', title: file.name, filename: file.name, thumbUrl: null };
-    }));
-    form.querySelector('textarea').value = '';
-    clearAttachments(root);
-    setPending(root, true);
-    Craft.sendActionRequest('POST', 'padstone-mason/chat/send', buildSendPayload(root, message, files)).then(function(response) {
-      setPending(root, false);
-      const data = response.data;
-      if (data.conversationId) {
-        if (data.conversations) {
-          renderConversations(root, data.conversations, data.conversationId);
-        }
-        setConversationId(root, data.conversationId);
-      }
-      showReply(root, data);
-      showPreview(root, data);
-    }).catch(function() {
-      setPending(root, false);
-      appendMessage(root, 'assistant', 'The change was not saved.');
-    });
-  });
-
   document.addEventListener('click', function(event) {
+    const send = event.target.closest('[data-assistant-send]');
+    if (send) {
+      event.preventDefault();
+      sendMessage(rootFrom(send));
+      return;
+    }
+
     const attach = event.target.closest('[data-assistant-attach]');
     if (attach) {
       event.preventDefault();
