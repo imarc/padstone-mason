@@ -12,6 +12,7 @@ use craft\db\ActiveRecord;
  * @property string|null $toolCallId
  * @property string|null $toolName
  * @property string|null $toolCalls
+ * @property string|null $metadata
  */
 class MessageRecord extends ActiveRecord
 {

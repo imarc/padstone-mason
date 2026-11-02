@@ -75,7 +75,7 @@ class FieldSupport
             return 'Object with type, value, and optional label. A URL string is accepted as a url link.';
         }
         if (self::isRelation($field)) {
-            return 'Existing element id, or a list of ids. Uploads are refused.';
+            return 'Existing element id, or a list of ids. Raw uploads in field values are refused; use conversation asset ids.';
         }
         if ($field instanceof CkeditorField) {
             return 'HTML string.';

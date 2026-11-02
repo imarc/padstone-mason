@@ -30,12 +30,34 @@ class Install extends Migration
             'toolCallId' => $this->string(),
             'toolName' => $this->string(),
             'toolCalls' => $this->longText(),
+            'metadata' => $this->longText(),
             'dateCreated' => $this->dateTime()->notNull(),
             'dateUpdated' => $this->dateTime()->notNull(),
             'uid' => $this->uid(),
         ]);
         $this->createIndex(null, '{{%padstonemason_messages}}', ['conversationId']);
         $this->addForeignKey(null, '{{%padstonemason_messages}}', ['conversationId'], '{{%padstonemason_conversations}}', ['id'], 'CASCADE', 'CASCADE');
+
+        $this->createTable('{{%padstonemason_conversation_assets}}', [
+            'id' => $this->primaryKey(),
+            'conversationId' => $this->integer()->notNull(),
+            'assetId' => $this->integer()->notNull(),
+            'sourceUrl' => $this->text(),
+            'dateCreated' => $this->dateTime()->notNull(),
+            'dateUpdated' => $this->dateTime()->notNull(),
+            'uid' => $this->uid(),
+        ]);
+        $this->createIndex(null, '{{%padstonemason_conversation_assets}}', ['conversationId', 'assetId'], true);
+        $this->createIndex(null, '{{%padstonemason_conversation_assets}}', ['assetId']);
+        $this->addForeignKey(
+            null,
+            '{{%padstonemason_conversation_assets}}',
+            ['conversationId'],
+            '{{%padstonemason_conversations}}',
+            ['id'],
+            'CASCADE',
+            'CASCADE',
+        );
 
         $this->createTable('{{%padstonemason_usage}}', [
             'id' => $this->primaryKey(),
@@ -57,6 +79,7 @@ class Install extends Migration
     public function safeDown(): bool
     {
         $this->dropTableIfExists('{{%padstonemason_usage}}');
+        $this->dropTableIfExists('{{%padstonemason_conversation_assets}}');
         $this->dropTableIfExists('{{%padstonemason_messages}}');
         $this->dropTableIfExists('{{%padstonemason_conversations}}');
 

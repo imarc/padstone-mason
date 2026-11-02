@@ -3,6 +3,7 @@
 namespace imarc\padstonemason\console\controllers;
 
 use Craft;
+use craft\elements\Asset;
 use craft\elements\Entry;
 use craft\elements\User;
 use craft\enums\CmsEdition;
@@ -16,6 +17,7 @@ use imarc\padstonemason\controllers\ChatController;
 use imarc\padstonemason\controllers\UsageController;
 use imarc\padstonemason\models\Settings;
 use imarc\padstonemason\Plugin;
+use imarc\padstonemason\records\ConversationAssetRecord;
 use imarc\padstonemason\records\ConversationRecord;
 use imarc\padstonemason\records\MessageRecord;
 use imarc\padstonemason\records\UsageRecord;
@@ -27,11 +29,15 @@ use imarc\padstonemason\services\providers\ToolInput;
 use ReflectionMethod;
 use yii\console\Controller;
 use yii\console\ExitCode;
+use yii\web\UploadedFile;
 
 class CheckController extends Controller
 {
     /** @var int[] */
     private array $elementIds = [];
+
+    /** @var int[] */
+    private array $assetIds = [];
 
     /** @var int[] */
     private array $conversationIds = [];
@@ -61,6 +67,7 @@ class CheckController extends Controller
             $this->checkPermissions($plugin, $admin);
             $this->checkProviders($plugin);
             $this->checkEditing($plugin, $admin);
+            $this->checkConversationAssets($plugin, $admin);
             $this->checkUnpublishAndDelete($plugin, $admin);
             $this->checkAssistantLoop($plugin, $admin);
             $this->checkConversations($plugin, $admin);
@@ -1301,6 +1308,16 @@ class CheckController extends Controller
         if (!str_contains($js, 'setPending') || !str_contains($js, 'Mason is writing')) {
             $this->failures[] = 'The panel script does not show a waiting indicator while the model replies.';
         }
+        if (
+            !str_contains($js, 'data-assistant-file')
+            || !str_contains($js, 'images[]')
+            || !str_contains($js, 'FormData')
+            || !str_contains($js, 'data-assistant-attach')
+            || !str_contains($send, 'uploadedImages')
+            || !str_contains($send, 'importUrlsFromText')
+        ) {
+            $this->failures[] = 'The panel does not upload or import conversation images.';
+        }
         $rendered = \craft\helpers\Markdown::process("**Bold**\n\n- one", 'gfm');
         if (!str_contains($js, "event.key !== 'Enter'") || !str_contains($js, 'event.shiftKey') || !str_contains($js, 'event.metaKey') || !str_contains($js, "setRangeText('\\n'") || !str_contains($js, 'requestSubmit')) {
             $this->failures[] = 'Enter does not send the prompt.';
@@ -1333,6 +1350,9 @@ class CheckController extends Controller
                 || !str_contains($allHtml, 'Assistant multi chat unbound message')
                 || !str_contains($allHtml, 'New chat')
                 || !str_contains($allHtml, 'data-assistant-delete')
+                || !str_contains($allHtml, 'data-assistant-attach')
+                || !str_contains($allHtml, 'data-assistant-file')
+                || !str_contains($allHtml, 'Attach image')
                 || !str_contains($entryHtml, 'Assistant multi chat alpha')
                 || str_contains($entryHtml, 'Assistant multi chat beta')
                 || str_contains($entryHtml, 'Assistant multi chat unbound message')
@@ -1343,6 +1363,114 @@ class CheckController extends Controller
             $this->failures[] = 'Could not render the conversation list: ' . $e->getMessage();
         } finally {
             $view->setTemplateMode($mode);
+        }
+    }
+
+    private function checkConversationAssets(Plugin $plugin, User $admin): void
+    {
+        Craft::$app->getUser()->setIdentity($admin);
+        $settings = $plugin->getSettings();
+        if ($settings->assetVolumeUid === '' || !$settings->assetVolume()) {
+            $this->failures[] = 'The image upload volume setting is missing.';
+
+            return;
+        }
+
+        $names = array_column($plugin->assistant->tools(), 'name');
+        if (!in_array('import_asset', $names, true) || in_array('upload_asset', $names, true)) {
+            $this->failures[] = 'import_asset is not available to the assistant.';
+        }
+
+        $chat = $this->startedConversation($plugin, $admin, null);
+        if (!$chat) {
+            return;
+        }
+
+        $media = $plugin->conversationAssets;
+        $urls = $media->extractImageUrls('See https://example.com/hero.png and https://example.com/doc.pdf and https://cdn.example.com/x?fm=webp');
+        if ($urls !== ['https://example.com/hero.png', 'https://cdn.example.com/x?fm=webp']) {
+            $this->failures[] = 'Image URL extraction was wrong: ' . json_encode($urls);
+        }
+
+        $bad = $media->importFromUrl('http://127.0.0.1/secret.png', $admin);
+        if (!empty($bad['ok'])) {
+            $this->failures[] = 'A private image URL was imported.';
+        }
+
+        $toolBad = $plugin->assistant->execute('import_asset', ['url' => 'not-a-url'], $chat, $admin);
+        if (!empty($toolBad['ok'])) {
+            $this->failures[] = 'import_asset accepted an invalid URL.';
+        }
+
+        $png = base64_decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==');
+        $temp = Craft::$app->getPath()->getTempPath() . '/padstone-mason-check-' . uniqid() . '.png';
+        file_put_contents($temp, $png);
+        $uploaded = $media->uploadFromRequest(new UploadedFile([
+            'name' => 'mason-check.png',
+            'tempName' => $temp,
+            'type' => 'image/png',
+            'size' => filesize($temp),
+            'error' => UPLOAD_ERR_OK,
+        ]), $admin);
+        if (empty($uploaded['ok'])) {
+            $this->failures[] = 'Could not upload a conversation image: ' . ($uploaded['error'] ?? '');
+
+            return;
+        }
+        $this->assetIds[] = (int)$uploaded['assetId'];
+        $attached = $media->attach($chat, [(int)$uploaded['assetId']], $admin);
+        if (empty($attached['ok']) || !ConversationAssetRecord::find()->where([
+            'conversationId' => (int)$chat->id,
+            'assetId' => (int)$uploaded['assetId'],
+        ])->exists()) {
+            $this->failures[] = 'Uploaded image was not linked to the conversation.';
+
+            return;
+        }
+
+        $prompt = (new ReflectionMethod($plugin->assistant, 'systemPrompt'))->invoke($plugin->assistant, $chat, $admin);
+        if (!is_string($prompt) || !str_contains($prompt, '#' . (int)$uploaded['assetId']) || !str_contains($prompt, 'import_asset')) {
+            $this->failures[] = 'Conversation assets are not listed in the assistant instructions.';
+        }
+
+        $created = $plugin->contentDesigner->createPage([
+            'title' => 'Assistant check assets page',
+            'section' => 'pages',
+            'entryType' => 'basicPage',
+            'slug' => 'assistant-check-assets-' . uniqid(),
+        ], $admin);
+        if (empty($created['ok'])) {
+            $this->failures[] = 'Could not create a page for the asset check: ' . ($created['error'] ?? '');
+
+            return;
+        }
+        $this->elementIds[] = (int)$created['entryId'];
+        $plugin->conversations->bind($chat, (int)$created['entryId'], (int)$created['draftId'], Craft::$app->getSites()->getPrimarySite()->id);
+        $draft = $plugin->contentDesigner->entryFromId((int)$created['entryId'], (int)$created['draftId'], null, $admin);
+        $block = $plugin->contentDesigner->addBlock($draft, 'contentDesigner', 'logoGridSection', null, [
+            'logos' => [(int)$uploaded['assetId']],
+        ], [], $admin);
+        if (empty($block['ok'])) {
+            $this->failures[] = 'Could not relate a conversation asset in a block: ' . ($block['error'] ?? '');
+        }
+
+        $plugin->conversations->addMessage($chat, 'user', 'Use the attached logo', metadata: [
+            'assetIds' => [(int)$uploaded['assetId']],
+        ]);
+        $modelMessages = $plugin->conversations->messagesForModel($chat);
+        $lastUser = null;
+        foreach ($modelMessages as $message) {
+            if (($message['role'] ?? '') === 'user') {
+                $lastUser = $message;
+            }
+        }
+        if (!$lastUser || !str_contains((string)$lastUser['content'], '#' . (int)$uploaded['assetId'])) {
+            $this->failures[] = 'Message asset metadata was not included for the model.';
+        }
+
+        $view = $plugin->conversations->ownedView((int)$chat->id, $admin);
+        if (!$view || empty($view['assets']) || empty($view['messages'])) {
+            $this->failures[] = 'ownedView did not include conversation assets.';
         }
     }
 
@@ -1512,6 +1640,7 @@ class CheckController extends Controller
             'conversation' => $conversation,
             'conversations' => $conversations,
             'messages' => [],
+            'assets' => [],
             'previewUrl' => null,
             'editUrl' => null,
             'draftNote' => 'Ask for a change. It stays on a draft until you publish it.',
@@ -1527,6 +1656,15 @@ class CheckController extends Controller
             $conversation = ConversationRecord::findOne($id);
             if ($conversation) {
                 $conversation->delete();
+            }
+        }
+        foreach ($this->assetIds as $id) {
+            if (!$id) {
+                continue;
+            }
+            $assets = Asset::find()->id($id)->status(null)->trashed(null)->all();
+            foreach ($assets as $asset) {
+                Craft::$app->getElements()->deleteElement($asset, true);
             }
         }
         foreach ($this->elementIds as $id) {

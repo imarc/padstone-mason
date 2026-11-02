@@ -206,7 +206,7 @@ class Conversations extends Component
     }
 
     /**
-     * @return array{ok: true, conversationId: int, title: string, entryId: ?int, draftId: ?int, messages: array<int, array{role: string, content: string, html: string}>, previewUrl: ?string, previewAvailable: bool, editUrl: ?string}|null
+     * @return array{ok: true, conversationId: int, title: string, entryId: ?int, draftId: ?int, messages: array<int, array{role: string, content: string, html: string, assets: array<int, array{id: int, title: string, filename: string, thumbUrl: ?string, url: ?string}>}>, assets: array<int, array{id: int, title: string, filename: string, thumbUrl: ?string, url: ?string}>, previewUrl: ?string, previewAvailable: bool, editUrl: ?string}|null
      */
     public function ownedView(int $id, User $user): ?array
     {
@@ -216,6 +216,7 @@ class Conversations extends Component
         }
 
         $preview = $this->previewFor($conversation, $user);
+        $media = Plugin::getInstance()->conversationAssets;
         $messages = [];
         foreach ($this->messagesForUser($conversation) as $message) {
             $content = (string)$message->content;
@@ -223,6 +224,7 @@ class Conversations extends Component
                 'role' => $message->role,
                 'content' => $content,
                 'html' => Markdown::process($content, 'gfm'),
+                'assets' => $this->assetsForMessage($message),
             ];
         }
 
@@ -233,6 +235,7 @@ class Conversations extends Component
             'entryId' => $conversation->entryId ? (int)$conversation->entryId : null,
             'draftId' => $conversation->draftId ? (int)$conversation->draftId : null,
             'messages' => $messages,
+            'assets' => $media->summariesForConversation((int)$conversation->id),
             'previewUrl' => $preview['previewUrl'],
             'previewAvailable' => $preview['previewAvailable'],
             'editUrl' => $preview['editUrl'],
@@ -241,6 +244,7 @@ class Conversations extends Component
 
     /**
      * @param array<int, array{id: string, name: string, arguments: array<string, mixed>}>|null $toolCalls
+     * @param array<string, mixed>|null $metadata
      */
     public function addMessage(
         ConversationRecord $conversation,
@@ -249,6 +253,7 @@ class Conversations extends Component
         ?string $toolCallId = null,
         ?string $toolName = null,
         ?array $toolCalls = null,
+        ?array $metadata = null,
     ): MessageRecord {
         $message = new MessageRecord();
         $message->conversationId = $conversation->id;
@@ -257,6 +262,7 @@ class Conversations extends Component
         $message->toolCallId = $toolCallId;
         $message->toolName = $toolName;
         $message->toolCalls = $toolCalls ? Json::encode($toolCalls) : null;
+        $message->metadata = $metadata ? Json::encode($metadata) : null;
         $message->save(false);
 
         if ($role === 'user' && !$conversation->entryId && $this->isPlaceholderTitle((string)$conversation->title)) {
@@ -279,9 +285,16 @@ class Conversations extends Component
 
         $messages = [];
         foreach ($records as $record) {
+            if (!$record instanceof MessageRecord) {
+                continue;
+            }
+            $content = $record->content;
+            if ($record->role === 'user') {
+                $content = $this->contentForModel($record);
+            }
             $messages[] = [
                 'role' => $record->role,
-                'content' => $record->content,
+                'content' => $content,
                 'toolCallId' => $record->toolCallId,
                 'toolName' => $record->toolName,
                 'toolCalls' => $record->toolCalls ? Json::decode($record->toolCalls) : null,
@@ -289,6 +302,38 @@ class Conversations extends Component
         }
 
         return $messages;
+    }
+
+    /**
+     * @return array<int, array{id: int, title: string, filename: string, thumbUrl: ?string, url: ?string}>
+     */
+    public function assetsForMessage(MessageRecord $message): array
+    {
+        $metadata = $message->metadata ? Json::decode($message->metadata) : null;
+        if (!is_array($metadata) || empty($metadata['assetIds']) || !is_array($metadata['assetIds'])) {
+            return [];
+        }
+
+        return Plugin::getInstance()->conversationAssets->summariesForIds(
+            array_map('intval', $metadata['assetIds']),
+        );
+    }
+
+    public function contentForModel(MessageRecord $message): string
+    {
+        $content = trim((string)$message->content);
+        $assets = $this->assetsForMessage($message);
+        if ($assets === []) {
+            return $content;
+        }
+
+        $parts = [];
+        foreach ($assets as $asset) {
+            $parts[] = '#' . $asset['id'] . ' "' . $asset['filename'] . '"';
+        }
+        $note = 'Attached assets for this message (use these ids in Assets fields): ' . implode(', ', $parts) . '.';
+
+        return $content === '' ? $note : $content . "\n\n" . $note;
     }
 
     /**

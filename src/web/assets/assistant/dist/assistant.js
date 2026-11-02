@@ -3,6 +3,8 @@
     return;
   }
 
+  const pendingFiles = new WeakMap();
+
   function rootFrom(element) {
     return element.closest('[data-assistant-root]');
   }
@@ -13,6 +15,13 @@
       entryId: root.getAttribute('data-entry-id') || undefined,
       siteId: root.getAttribute('data-site-id') || undefined
     };
+  }
+
+  function filesFor(root) {
+    if (!pendingFiles.has(root)) {
+      pendingFiles.set(root, []);
+    }
+    return pendingFiles.get(root);
   }
 
   function renderConversations(root, conversations, selectedId) {
@@ -40,6 +49,44 @@
     }
   }
 
+  function assetFigures(assets) {
+    const wrap = document.createElement('div');
+    wrap.className = 'padstone-mason__message-assets';
+    (assets || []).forEach(function(asset) {
+      const figure = document.createElement('figure');
+      figure.className = 'padstone-mason__thumb';
+      if (asset.thumbUrl) {
+        const img = document.createElement('img');
+        img.src = asset.thumbUrl;
+        img.alt = asset.title || asset.filename || '';
+        img.width = 64;
+        img.height = 64;
+        figure.appendChild(img);
+      }
+      const caption = document.createElement('figcaption');
+      caption.textContent = '#' + asset.id + ' ' + (asset.filename || '');
+      figure.appendChild(caption);
+      wrap.appendChild(figure);
+    });
+    return wrap;
+  }
+
+  function fillMessage(article, message) {
+    article.replaceChildren();
+    if (message.html) {
+      const body = document.createElement('div');
+      body.innerHTML = message.html;
+      while (body.firstChild) {
+        article.appendChild(body.firstChild);
+      }
+    } else if (message.content) {
+      article.textContent = message.content;
+    }
+    if (message.assets && message.assets.length) {
+      article.appendChild(assetFigures(message.assets));
+    }
+  }
+
   function replaceTranscript(root, messages) {
     const transcript = root.querySelector('[data-assistant-transcript]');
     transcript.replaceChildren();
@@ -47,7 +94,7 @@
       const article = document.createElement('article');
       article.className = 'padstone-mason__message padstone-mason__message--' + message.role;
       article.dataset.role = message.role;
-      article.innerHTML = message.html || '';
+      fillMessage(article, message);
       transcript.appendChild(article);
     });
     transcript.scrollTop = transcript.scrollHeight;
@@ -73,6 +120,43 @@
     }
   }
 
+  function clearAttachments(root) {
+    pendingFiles.set(root, []);
+    const input = root.querySelector('[data-assistant-file]');
+    if (input) {
+      input.value = '';
+    }
+    renderAttachments(root);
+  }
+
+  function renderAttachments(root) {
+    const strip = root.querySelector('[data-assistant-attachments]');
+    if (!strip) {
+      return;
+    }
+    const files = filesFor(root);
+    strip.replaceChildren();
+    if (!files.length) {
+      strip.hidden = true;
+      return;
+    }
+    strip.hidden = false;
+    files.forEach(function(file, index) {
+      const chip = document.createElement('div');
+      chip.className = 'padstone-mason__attachment';
+      const name = document.createElement('span');
+      name.textContent = file.name;
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'padstone-mason__attachment-remove';
+      remove.dataset.assistantRemoveFile = String(index);
+      remove.setAttribute('aria-label', 'Remove ' + file.name);
+      remove.textContent = '×';
+      chip.append(name, remove);
+      strip.appendChild(chip);
+    });
+  }
+
   function applyConversation(root, data) {
     const id = data.conversationId || '';
     if (data.conversations) {
@@ -87,6 +171,7 @@
     } else {
       root.removeAttribute('data-edit-url');
     }
+    clearAttachments(root);
     showPreview(root, data);
   }
 
@@ -99,6 +184,10 @@
     const submit = root.querySelector('[data-assistant-form] button[type="submit"]');
     if (submit) {
       submit.disabled = pending;
+    }
+    const attach = root.querySelector('[data-assistant-attach]');
+    if (attach) {
+      attach.disabled = pending;
     }
     if (!pending) {
       return;
@@ -125,16 +214,16 @@
     transcript.scrollTop = transcript.scrollHeight;
   }
 
-  function appendMessage(root, role, text, html) {
+  function appendMessage(root, role, text, html, assets) {
     const transcript = root.querySelector('[data-assistant-transcript]');
     const article = document.createElement('article');
     article.className = 'padstone-mason__message padstone-mason__message--' + role;
     article.dataset.role = role;
-    if (html) {
-      article.innerHTML = html;
-    } else {
-      article.textContent = text;
-    }
+    fillMessage(article, {
+      content: text,
+      html: html,
+      assets: assets || []
+    });
     transcript.appendChild(article);
     transcript.scrollTop = transcript.scrollHeight;
   }
@@ -272,6 +361,29 @@
     }
   }
 
+  function buildSendPayload(root, message, files) {
+    const base = Object.assign({
+      conversationId: root.getAttribute('data-conversation-id') || '',
+      message: message
+    }, requestData(root));
+
+    if (!files.length) {
+      return { data: base };
+    }
+
+    const formData = new FormData();
+    Object.keys(base).forEach(function(key) {
+      if (base[key] !== undefined && base[key] !== null) {
+        formData.append(key, base[key]);
+      }
+    });
+    files.forEach(function(file) {
+      formData.append('images[]', file, file.name);
+    });
+
+    return { data: formData };
+  }
+
   document.addEventListener('click', function(event) {
     const button = event.target.closest('[data-padstone-mason]');
     if (!button || typeof Craft.CpScreenSlideout === 'undefined') {
@@ -310,6 +422,23 @@
     }
   });
 
+  document.addEventListener('change', function(event) {
+    const input = event.target.closest('[data-assistant-file]');
+    if (!input) {
+      return;
+    }
+    const root = rootFrom(input);
+    const files = filesFor(root);
+    Array.prototype.forEach.call(input.files || [], function(file) {
+      if (!file.type || file.type.indexOf('image/') !== 0) {
+        return;
+      }
+      files.push(file);
+    });
+    input.value = '';
+    renderAttachments(root);
+  });
+
   document.addEventListener('submit', function(event) {
     const form = event.target.closest('[data-assistant-form]');
     if (!form) {
@@ -318,21 +447,20 @@
     event.preventDefault();
     const root = rootFrom(form);
     const message = form.querySelector('textarea').value.trim();
-    if (!message) {
+    const files = filesFor(root).slice();
+    if (!message && !files.length) {
       return;
     }
     if (root.querySelector('[data-assistant-pending]')) {
       return;
     }
-    appendMessage(root, 'user', message);
+    appendMessage(root, 'user', message || ('Attached ' + files.length + (files.length === 1 ? ' image.' : ' images.')), null, files.map(function(file) {
+      return { id: '', title: file.name, filename: file.name, thumbUrl: null };
+    }));
     form.querySelector('textarea').value = '';
+    clearAttachments(root);
     setPending(root, true);
-    Craft.sendActionRequest('POST', 'padstone-mason/chat/send', {
-      data: Object.assign({
-        conversationId: root.getAttribute('data-conversation-id'),
-        message: message
-      }, requestData(root))
-    }).then(function(response) {
+    Craft.sendActionRequest('POST', 'padstone-mason/chat/send', buildSendPayload(root, message, files)).then(function(response) {
       setPending(root, false);
       const data = response.data;
       if (data.conversationId) {
@@ -350,6 +478,30 @@
   });
 
   document.addEventListener('click', function(event) {
+    const attach = event.target.closest('[data-assistant-attach]');
+    if (attach) {
+      event.preventDefault();
+      const root = rootFrom(attach);
+      const input = root.querySelector('[data-assistant-file]');
+      if (input) {
+        input.click();
+      }
+      return;
+    }
+
+    const removeFile = event.target.closest('[data-assistant-remove-file]');
+    if (removeFile) {
+      event.preventDefault();
+      const root = rootFrom(removeFile);
+      const index = parseInt(removeFile.getAttribute('data-assistant-remove-file'), 10);
+      const files = filesFor(root);
+      if (!Number.isNaN(index)) {
+        files.splice(index, 1);
+        renderAttachments(root);
+      }
+      return;
+    }
+
     const create = event.target.closest('[data-assistant-new]');
     if (create) {
       event.preventDefault();

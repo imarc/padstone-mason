@@ -21,7 +21,8 @@ Control-panel chat for entries the current user can save. It edits the fields on
 
 4. In **Settings → Plugins → Padstone Mason**, choose the provider and model. Defaults are OpenAI and `gpt-4.1`. For Anthropic, set the model as well (for example `claude-sonnet-4-5`).
 5. List the section handles the assistant may create. The default is `pages`. An empty list blocks new pages and still allows edits to an existing entry.
-6. Grant **Padstone Mason → Use Ask Mason**. Admins already have it. Settings and the usage report stay admin-only.
+6. Choose the **Image upload volume** and optional folder path (default `mason`). Uploaded and URL-imported images land there. Users still need Craft permission to save assets in that volume.
+7. Grant **Padstone Mason → Use Ask Mason**. Admins already have it. Settings and the usage report stay admin-only.
 
 Turn **Enabled** off to hide the assistant. The settings screen stays available.
 
@@ -35,18 +36,19 @@ Turn **Enabled** off to hide the assistant. The settings screen stays available.
 - **Unpublish** disables the live entry when you ask. The chat stays bound to it.
 - **Delete** moves the entry to the trash when you ask, and clears that chat’s binding. Craft’s delete permission still applies.
 - **Padstone Mason → Usage** (admins) totals prompt and completion tokens by user, provider, and model for a date range. Rows are written only when the provider reports usage. Message text and API keys are not stored.
+- **Attach image** uploads files into the configured volume and links them to the chat. Pasted image URLs in a message are downloaded the same way. The assistant sees those asset ids and can place them in Assets fields on any number of blocks. It can also call `import_asset` for a new URL later in the chat.
 
 Each person only sees their own chats. The assistant does not read unsaved changes in the entry form.
 
 ## What it can edit
 
-The fields on the entry's layout. Matrix fields, including Content Designer and the hero when those fields exist, can take their existing block types, including nested fields such as columns and cards. Other writable layout fields, such as the breadcrumb title, can be updated on the entry. Writable fields are plain text, CKEditor, lightswitch, dropdown, link, regex, and existing assets or entries by id.
+The fields on the entry's layout. Matrix fields, including Content Designer and the hero when those fields exist, can take their existing block types, including nested fields such as columns and cards. Other writable layout fields, such as the breadcrumb title, can be updated on the entry. Writable fields are plain text, CKEditor, lightswitch, dropdown, link, regex, and existing assets or entries by id (including conversation uploads).
 
 A shared section is a relation to an existing shared block. Inner blocks are not copied.
 
 ## What it will not do
 
-- Invent a block type, change project config, or upload a file.
+- Invent a block type, change project config, or put raw file bytes into field values.
 - Write SEOmatic, code, or Pickture fields. Those are skipped and the rest of the update can still save.
 - Drop a nested Matrix field below its minimum or above its maximum. A two-column section needs both columns in the same save.
 - Publish, or edit an entry the current user cannot save.

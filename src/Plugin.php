@@ -17,6 +17,7 @@ use craft\web\View;
 use imarc\padstonemason\models\Settings;
 use imarc\padstonemason\services\Assistant;
 use imarc\padstonemason\services\ContentDesigner;
+use imarc\padstonemason\services\ConversationAssets;
 use imarc\padstonemason\services\Conversations;
 use imarc\padstonemason\services\Usage;
 use imarc\padstonemason\web\assets\assistant\AssistantAsset;
@@ -26,6 +27,7 @@ use yii\base\Event;
  * @property ContentDesigner $contentDesigner
  * @property Assistant $assistant
  * @property Conversations $conversations
+ * @property ConversationAssets $conversationAssets
  * @property Usage $usage
  * @method Settings getSettings()
  */
@@ -33,7 +35,7 @@ class Plugin extends BasePlugin
 {
     public const PERMISSION = 'padstoneMason:use';
 
-    public string $schemaVersion = '1.1.0';
+    public string $schemaVersion = '1.2.0';
 
     public bool $hasCpSettings = true;
 
@@ -47,6 +49,7 @@ class Plugin extends BasePlugin
             'contentDesigner' => ContentDesigner::class,
             'assistant' => Assistant::class,
             'conversations' => Conversations::class,
+            'conversationAssets' => ConversationAssets::class,
             'usage' => Usage::class,
         ]);
 

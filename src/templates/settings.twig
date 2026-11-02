@@ -48,3 +48,20 @@
     rows: 5,
     instructions: "One section handle per line. Leave this empty to refuse page creation. Editing an existing Content Designer entry is still allowed."
 }) }}
+
+{{ forms.selectField({
+    label: "Image upload volume",
+    name: "assetVolumeUid",
+    options: settings.volumeOptions(),
+    value: settings.assetVolumeUid,
+    errors: settings.getErrors('assetVolumeUid'),
+    instructions: "Uploaded and URL-imported images are saved here. The current user still needs permission to save assets in that volume."
+}) }}
+
+{{ forms.textField({
+    label: "Image folder path",
+    name: "assetFolderPath",
+    value: settings.assetFolderPath,
+    errors: settings.getErrors('assetFolderPath'),
+    instructions: "Optional subfolder inside the volume, such as mason. Leave blank to use the volume root."
+}) }}
