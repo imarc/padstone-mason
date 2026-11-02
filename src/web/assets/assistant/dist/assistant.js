@@ -4,6 +4,7 @@
   }
 
   const pendingFiles = new WeakMap();
+  const REOPEN_KEY = 'padstone-mason-reopen';
 
   function rootFrom(element) {
     return element.closest('[data-assistant-root]');
@@ -15,6 +16,191 @@
       entryId: root.getAttribute('data-entry-id') || undefined,
       siteId: root.getAttribute('data-site-id') || undefined
     };
+  }
+
+  function pageDraftId() {
+    try {
+      return new URLSearchParams(window.location.search).get('draftId') || '';
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function normalizeDraftId(value) {
+    if (value === null || value === undefined || value === '' || value === false) {
+      return '';
+    }
+    return String(value);
+  }
+
+  function setBoundDraftId(root, draftId) {
+    const value = normalizeDraftId(draftId);
+    if (value) {
+      root.setAttribute('data-bound-draft-id', value);
+    } else {
+      root.removeAttribute('data-bound-draft-id');
+    }
+  }
+
+  function boundDraftIdFrom(root, data) {
+    if (data && Object.prototype.hasOwnProperty.call(data, 'draftId')) {
+      return normalizeDraftId(data.draftId);
+    }
+    return root.getAttribute('data-bound-draft-id') || '';
+  }
+
+  function syncEditorToBoundDraft(root, data) {
+    if (!root || root.getAttribute('data-scope') !== 'entry') {
+      return false;
+    }
+    data = data || {};
+    if (Object.prototype.hasOwnProperty.call(data, 'draftId')) {
+      setBoundDraftId(root, data.draftId);
+    }
+    if (Object.prototype.hasOwnProperty.call(data, 'editUrl')) {
+      if (data.editUrl) {
+        root.setAttribute('data-edit-url', data.editUrl);
+      } else {
+        root.removeAttribute('data-edit-url');
+      }
+    }
+
+    const editUrl = root.getAttribute('data-edit-url') || '';
+    if (!editUrl) {
+      return false;
+    }
+
+    const bound = boundDraftIdFrom(root, data);
+    if (bound === pageDraftId()) {
+      return false;
+    }
+
+    const payload = {
+      conversationId: data.conversationId || root.getAttribute('data-conversation-id') || '',
+      entryId: data.entryId || root.getAttribute('data-entry-id') || '',
+      draftId: bound || null,
+      siteId: data.siteId || root.getAttribute('data-site-id') || ''
+    };
+    try {
+      sessionStorage.setItem(REOPEN_KEY, JSON.stringify(payload));
+    } catch (e) {
+      // Ignore storage failures and still navigate.
+    }
+    window.location.assign(editUrl);
+    return true;
+  }
+
+  function openMasonSlideout(params) {
+    if (typeof Craft.CpScreenSlideout === 'undefined') {
+      return null;
+    }
+    const slideout = new Craft.CpScreenSlideout('padstone-mason/chat/panel', {
+      containerElement: 'div',
+      params: params
+    });
+    slideout.on('load', function() {
+      const root = slideout.$content && slideout.$content.find('[data-assistant-root]').get(0);
+      if (!root) {
+        return;
+      }
+      syncEditorToBoundDraft(root, {
+        conversationId: root.getAttribute('data-conversation-id') || '',
+        entryId: root.getAttribute('data-entry-id') || '',
+        draftId: root.getAttribute('data-bound-draft-id') || '',
+        siteId: root.getAttribute('data-site-id') || '',
+        editUrl: root.getAttribute('data-edit-url') || ''
+      });
+    });
+    return slideout;
+  }
+
+  function readReopenPayload() {
+    let raw;
+    try {
+      raw = sessionStorage.getItem(REOPEN_KEY);
+    } catch (e) {
+      return null;
+    }
+    if (!raw) {
+      return null;
+    }
+    try {
+      return JSON.parse(raw);
+    } catch (e) {
+      clearReopen();
+      return null;
+    }
+  }
+
+  function clearReopen() {
+    try {
+      sessionStorage.removeItem(REOPEN_KEY);
+    } catch (e) {
+      // Ignore.
+    }
+  }
+
+  function editorMatchesReopen(payload) {
+    const bound = normalizeDraftId(payload.draftId);
+    if (bound === pageDraftId()) {
+      return true;
+    }
+    const button = document.querySelector('[data-padstone-mason]');
+    if (!button) {
+      return false;
+    }
+    if (bound && bound === normalizeDraftId(button.getAttribute('data-draft-id'))) {
+      return true;
+    }
+    if (!bound && !pageDraftId() && !normalizeDraftId(button.getAttribute('data-draft-id'))) {
+      return String(payload.entryId) === String(button.getAttribute('data-entry-id'));
+    }
+
+    return false;
+  }
+
+  function consumeReopen(attempt) {
+    attempt = attempt || 0;
+    const payload = readReopenPayload();
+    if (!payload) {
+      return;
+    }
+    if (!payload.entryId || !payload.siteId) {
+      clearReopen();
+      return;
+    }
+
+    const button = document.querySelector('[data-padstone-mason]');
+    if (!button || typeof Craft.CpScreenSlideout === 'undefined' || !editorMatchesReopen(payload)) {
+      // Entry chrome and draft URLs can land after this asset runs.
+      if (attempt < 50) {
+        window.setTimeout(function() {
+          consumeReopen(attempt + 1);
+        }, 50);
+        return;
+      }
+      clearReopen();
+      return;
+    }
+
+    clearReopen();
+    openMasonSlideout({
+      entryId: button.getAttribute('data-entry-id') || payload.entryId,
+      draftId: button.getAttribute('data-draft-id') || payload.draftId || null,
+      siteId: button.getAttribute('data-site-id') || payload.siteId,
+      conversationId: payload.conversationId || null
+    });
+  }
+
+  function scheduleConsumeReopen() {
+    const start = function() {
+      consumeReopen(0);
+    };
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', start);
+    } else {
+      start();
+    }
   }
 
   function filesFor(root) {
@@ -243,12 +429,16 @@
     }
     if (data.editUrl) {
       root.setAttribute('data-edit-url', data.editUrl);
-    } else {
+    } else if (Object.prototype.hasOwnProperty.call(data, 'editUrl')) {
       root.removeAttribute('data-edit-url');
+    }
+    if (Object.prototype.hasOwnProperty.call(data, 'draftId')) {
+      setBoundDraftId(root, data.draftId);
     }
     clearAttachments(root);
     showPreview(root, data);
     setBoundBadge(root, data);
+    syncEditorToBoundDraft(root, data);
   }
 
   function setPending(root, pending) {
@@ -472,15 +662,14 @@
     }
     event.preventDefault();
     // containerElement must not be "form": that adds a Save button which POSTs to /admin with no action.
-    new Craft.CpScreenSlideout('padstone-mason/chat/panel', {
-      containerElement: 'div',
-      params: {
-        entryId: button.getAttribute('data-entry-id'),
-        draftId: button.getAttribute('data-draft-id') || null,
-        siteId: button.getAttribute('data-site-id')
-      }
+    openMasonSlideout({
+      entryId: button.getAttribute('data-entry-id'),
+      draftId: button.getAttribute('data-draft-id') || null,
+      siteId: button.getAttribute('data-site-id')
     });
   });
+
+  scheduleConsumeReopen();
 
   function sendMessage(root) {
     const form = root.querySelector('[data-assistant-form]');
@@ -515,6 +704,8 @@
       }
       showReply(root, data);
       showPreview(root, data);
+      setBoundBadge(root, data);
+      syncEditorToBoundDraft(root, data);
     }).catch(function() {
       setPending(root, false);
       appendMessage(root, 'assistant', 'The change was not saved.');
@@ -658,6 +849,8 @@
     }).then(function(response) {
       appendMessage(root, 'assistant', response.data.reply || 'The change was not saved.');
       showPreview(root, response.data);
+      setBoundBadge(root, response.data);
+      syncEditorToBoundDraft(root, response.data);
     }).catch(function() {
       appendMessage(root, 'assistant', 'The change was not saved.');
     });

@@ -70,20 +70,12 @@ class ConversationDrafts
         if (!$draft instanceof Entry) {
             return $draft;
         }
-        $block = Plugin::getInstance()->contentDesigner->blockFromId($blockId, $draft->siteId);
-        if (!$block) {
-            return ['ok' => false, 'saved' => false, 'error' => 'That block was not found.'];
+
+        $block = Plugin::getInstance()->contentDesigner->findBlockOnEntry($draft, $blockId);
+        if (!$block instanceof Entry) {
+            return ['ok' => false, 'saved' => false, 'error' => 'That block is not on this draft.'];
         }
 
-        $current = $block;
-        while ($current instanceof Entry) {
-            if ((int)$current->id === (int)$draft->id) {
-                return $block;
-            }
-            $owner = $current->getOwner();
-            $current = $owner instanceof Entry ? $owner : null;
-        }
-
-        return ['ok' => false, 'saved' => false, 'error' => 'That block is not on this draft.'];
+        return $block;
     }
 }

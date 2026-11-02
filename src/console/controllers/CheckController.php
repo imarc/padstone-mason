@@ -762,6 +762,74 @@ class CheckController extends Controller
             }
         });
         Craft::$app->getUser()->setIdentity($admin);
+
+        $forkHero = $plugin->contentDesigner->createPage([
+            'title' => 'Assistant check fork hero',
+            'section' => 'pages',
+            'entryType' => 'basicPage',
+            'slug' => 'assistant-check-fork-hero-' . uniqid(),
+        ], $admin);
+        if (empty($forkHero['ok'])) {
+            $this->failures[] = 'Could not create a page to fork-update hero: ' . ($forkHero['error'] ?? '');
+
+            return;
+        }
+        $this->elementIds[] = (int)$forkHero['entryId'];
+        $forkDraft = $plugin->contentDesigner->entryFromId((int)$forkHero['entryId'], (int)$forkHero['draftId'], null, $admin);
+        $heroSeed = $forkDraft ? $plugin->contentDesigner->addBlock($forkDraft, 'hero', 'standardHero', null, [
+            'heroEyebrow' => 'Live eyebrow',
+            'heroHeadline' => 'Live headline',
+            'heroContent' => '<p>Live</p>',
+            'ctaLink' => 'https://example.com/fork-hero',
+        ], [], $admin) : ['ok' => false];
+        $forkDraft = $plugin->contentDesigner->entryFromId((int)$forkHero['entryId'], (int)$forkHero['draftId'], null, $admin);
+        $publishedFork = $forkDraft && !empty($heroSeed['ok'])
+            ? $plugin->contentDesigner->publishDraft($forkDraft, $admin)
+            : ['ok' => false];
+        $liveFork = !empty($publishedFork['ok'])
+            ? Entry::find()->id((int)$forkHero['entryId'])->status(null)->one()
+            : null;
+        $forked = $liveFork instanceof Entry
+            ? $plugin->contentDesigner->forkAssistantDraft($liveFork, $admin)
+            : ['ok' => false];
+        /** @var Entry|null $masonDraft */
+        $masonDraft = !empty($forked['ok']) && ($forked['entry'] ?? null) instanceof Entry
+            ? $forked['entry']
+            : null;
+        $forkLayout = $masonDraft ? $plugin->contentDesigner->readLayout($masonDraft, $admin) : [];
+        $forkHeroId = (int)($forkLayout['matrices']['hero']['blocks'][0]['id'] ?? 0);
+        $foundOnDraft = $masonDraft && $forkHeroId
+            ? $plugin->contentDesigner->findBlockOnEntry($masonDraft, $forkHeroId)
+            : null;
+        $forkChat = $masonDraft
+            ? $plugin->conversations->open(
+                $admin->id,
+                (int)$masonDraft->getCanonicalId(),
+                $masonDraft->draftId ? (int)$masonDraft->draftId : null,
+                (int)$masonDraft->siteId,
+            )
+            : null;
+        if ($forkChat) {
+            $this->conversationIds[] = (int)$forkChat->id;
+        }
+        $forkUpdated = $forkChat && $forkHeroId
+            ? $plugin->assistant->execute('update_block', [
+                'blockId' => $forkHeroId,
+                'values' => ['heroEyebrow' => 'Draft eyebrow'],
+            ], $forkChat, $admin)
+            : ['ok' => false, 'error' => 'Could not prepare fork hero update.'];
+        if (
+            empty($heroSeed['ok'])
+            || empty($publishedFork['ok'])
+            || !$masonDraft
+            || $forkHeroId < 1
+            || !$foundOnDraft instanceof Entry
+            || empty($forkUpdated['ok'])
+        ) {
+            $this->failures[] = 'Updating a published Matrix block on a Mason draft failed: '
+                . ($forkUpdated['error'] ?? '')
+                . ' heroId=' . $forkHeroId;
+        }
     }
 
     private function checkAssistantLoop(Plugin $plugin, User $admin): void
@@ -1325,6 +1393,21 @@ class CheckController extends Controller
         if (!str_contains($rendered, '<strong>Bold</strong>') || !str_contains($rendered, '<li>one</li>') || !str_contains($send, 'replyHtml') || !str_contains($js, 'data.messages')) {
             $this->failures[] = 'Live replies are not rendered as Markdown.';
         }
+        $panelSource = $this->methodSource(new ReflectionMethod(ChatController::class, 'actionPanel'));
+        $selectedSource = $this->methodSource(new ReflectionMethod(ChatController::class, 'selectedConversation'));
+        if (
+            !str_contains($js, 'syncEditorToBoundDraft')
+            || !str_contains($js, 'padstone-mason-reopen')
+            || !str_contains($js, 'openMasonSlideout')
+            || !str_contains($js, 'consumeReopen')
+            || !str_contains($js, 'scheduleConsumeReopen')
+            || !str_contains($js, 'editorMatchesReopen')
+            || !str_contains($js, 'data-bound-draft-id')
+            || !str_contains($selectedSource, 'conversationMatchesScope')
+            || !str_contains($panelSource, 'selectedConversation')
+        ) {
+            $this->failures[] = 'Entry-scoped Mason does not sync the edit screen to the bound draft.';
+        }
 
         $view = Craft::$app->getView();
         $mode = $view->getTemplateMode();
@@ -1356,6 +1439,7 @@ class CheckController extends Controller
                 || !str_contains($entryHtml, 'Assistant multi chat alpha')
                 || str_contains($entryHtml, 'Assistant multi chat beta')
                 || str_contains($entryHtml, 'Assistant multi chat unbound message')
+                || ($first->draftId && !str_contains($entryHtml, 'data-bound-draft-id="' . (int)$first->draftId . '"'))
             ) {
                 $this->failures[] = 'Chat and the entry slideout did not list the conversations for their scope.';
             }
@@ -1636,6 +1720,8 @@ class CheckController extends Controller
      */
     private function panelRender(array $conversations, ConversationRecord $conversation, ?int $entryId, ?int $siteId, string $scope): array
     {
+        $boundDraftId = $conversation->draftId ? (int)$conversation->draftId : null;
+
         return [
             'conversation' => $conversation,
             'conversations' => $conversations,
@@ -1644,7 +1730,8 @@ class CheckController extends Controller
             'previewUrl' => null,
             'editUrl' => null,
             'boundTitle' => null,
-            'boundIsDraft' => false,
+            'boundIsDraft' => (bool)$boundDraftId,
+            'boundDraftId' => $boundDraftId,
             'draftNote' => 'Ask for a change. It stays on a draft until you publish it.',
             'entryId' => $entryId,
             'siteId' => $siteId,

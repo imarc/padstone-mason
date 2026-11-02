@@ -9,6 +9,7 @@
     {% if editUrl %}data-edit-url="{{ editUrl }}"{% endif %}
     {% if boundTitle %}data-bound-title="{{ boundTitle|e('html_attr') }}"{% endif %}
     {% if boundIsDraft %}data-bound-draft="1"{% endif %}
+    {% if boundDraftId %}data-bound-draft-id="{{ boundDraftId }}"{% endif %}
 >
     <div class="padstone-mason__bound" data-assistant-bound{% if not boundTitle %} data-empty="true"{% endif %}>
         <span class="padstone-mason__bound-label">{% if boundTitle %}Bound page{% else %}No page bound{% endif %}</span>

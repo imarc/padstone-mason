@@ -701,6 +701,41 @@ class ContentDesigner extends Component
         return $block instanceof Entry ? $block : null;
     }
 
+    /**
+     * Find a Matrix block by id under an entry (or nested block), using the same owner-scoped
+     * field queries as read_layout. Craft named drafts reuse canonical nested element ids and
+     * only add elements_owners rows, so a bare id lookup + getOwner() walk misses the draft.
+     */
+    public function findBlockOnEntry(Entry $root, int $blockId): ?Entry
+    {
+        if ($blockId < 1) {
+            return null;
+        }
+
+        return $this->findBlockUnder($root, $blockId);
+    }
+
+    private function findBlockUnder(Entry $owner, int $blockId): ?Entry
+    {
+        foreach ($this->customFields($owner->getType()) as $custom) {
+            $field = $custom['field'];
+            if (!$field instanceof Matrix) {
+                continue;
+            }
+            foreach ($this->blocks($owner, $field) as $block) {
+                if ((int)$block->id === $blockId) {
+                    return $block;
+                }
+                $nested = $this->findBlockUnder($block, $blockId);
+                if ($nested instanceof Entry) {
+                    return $nested;
+                }
+            }
+        }
+
+        return null;
+    }
+
     private function describeMatrix(Matrix $field): array
     {
         $types = [];

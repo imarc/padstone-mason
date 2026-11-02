@@ -350,6 +350,9 @@ class ChatController extends Controller
     }
 
     /**
+     * Prefer an explicit conversationId (e.g. slideout reopen) when it belongs to this user
+     * and matches the entry/site scope. Otherwise use the newest summary.
+     *
      * @param array<int, array{id: int, title: string, entryId: ?int, draftId: ?int}> $summaries
      */
     private function selectedConversation(int $userId, ?int $entryId, ?int $siteId, array $summaries): ?ConversationRecord
@@ -357,10 +360,8 @@ class ChatController extends Controller
         $requested = (int)$this->request->getParam('conversationId');
         if ($requested) {
             $owned = Plugin::getInstance()->conversations->findOwned($requested, $userId);
-            if ($owned && ($entryId === null || (int)$owned->entryId === $entryId)) {
-                if ($entryId === null || !$siteId || (int)$owned->siteId === $siteId) {
-                    return $owned;
-                }
+            if ($owned && $this->conversationMatchesScope($owned, $entryId, $siteId)) {
+                return $owned;
             }
         }
 
@@ -370,6 +371,18 @@ class ChatController extends Controller
         }
 
         return Plugin::getInstance()->conversations->findOwned((int)$first['id'], $userId);
+    }
+
+    private function conversationMatchesScope(ConversationRecord $conversation, ?int $entryId, ?int $siteId): bool
+    {
+        if ($entryId !== null && (int)$conversation->entryId !== $entryId) {
+            return false;
+        }
+        if ($entryId !== null && $siteId && (int)$conversation->siteId !== $siteId) {
+            return false;
+        }
+
+        return true;
     }
 
     /**
@@ -408,6 +421,8 @@ class ChatController extends Controller
             ? Plugin::getInstance()->conversations->ownedView((int)$conversation->id, $user)
             : null;
 
+        $boundDraftId = $preview['draftId'] ?? ($conversation?->draftId ? (int)$conversation->draftId : null);
+
         return [
             'conversation' => $conversation,
             'conversations' => $summaries,
@@ -418,6 +433,7 @@ class ChatController extends Controller
             'editUrl' => $preview['editUrl'] ?? null,
             'boundTitle' => $preview['boundTitle'] ?? null,
             'boundIsDraft' => (bool)($preview['boundIsDraft'] ?? false),
+            'boundDraftId' => $boundDraftId ? (int)$boundDraftId : null,
             'draftNote' => $draftNote,
             'entryId' => $entryId,
             'siteId' => $siteId,
