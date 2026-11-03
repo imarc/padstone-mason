@@ -281,6 +281,60 @@ class ConversationAssets extends Component
     }
 
     /**
+     * @return array{ok: true, assets: array<int, array{id: int, title: string, filename: string, thumbUrl: ?string, url: ?string}>}
+     */
+    public function listForConversation(int $conversationId): array
+    {
+        return [
+            'ok' => true,
+            'assets' => $this->summariesForConversation($conversationId),
+        ];
+    }
+
+    /**
+     * @return array{ok: bool, saved?: bool, assetId?: int, title?: string, alt?: ?string, filename?: string, error?: string}
+     */
+    public function updateMeta(int $assetId, ?string $title, ?string $alt, User $user): array
+    {
+        $asset = Asset::find()->id($assetId)->status(null)->one();
+        if (!$asset instanceof Asset) {
+            return ['ok' => false, 'saved' => false, 'error' => 'That asset was not found.'];
+        }
+        if (!Craft::$app->getElements()->canSave($asset, $user)) {
+            return ['ok' => false, 'saved' => false, 'error' => 'You do not have permission to save that asset.'];
+        }
+        if ($title === null && $alt === null) {
+            return ['ok' => false, 'saved' => false, 'error' => 'Provide a title and/or alt value to update.'];
+        }
+
+        if ($title !== null) {
+            $asset->title = $title;
+        }
+        if ($alt !== null) {
+            $asset->alt = $alt;
+        }
+
+        if (!Craft::$app->getElements()->saveElement($asset)) {
+            $errors = $asset->getFirstErrors();
+
+            return [
+                'ok' => false,
+                'saved' => false,
+                'error' => $errors !== [] ? implode(' ', $errors) : 'The asset could not be saved.',
+            ];
+        }
+
+        return [
+            'ok' => true,
+            'saved' => true,
+            'assetId' => (int)$asset->id,
+            'title' => (string)$asset->title,
+            'alt' => $asset->alt,
+            'filename' => (string)$asset->getFilename(),
+        ];
+    }
+
+    /**
      * @return array{ok: bool, folder?: VolumeFolder, error?: string}
      */
     public function resolveUploadFolder(): array

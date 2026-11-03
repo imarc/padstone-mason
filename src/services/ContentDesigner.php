@@ -25,6 +25,8 @@ class ContentDesigner extends Component
 {
     public const UNRESOLVED_MESSAGE = 'Ask the admin which section and entry type to use, and include these sections and entry types in the question. Do not say the request is impossible or a project config change.';
 
+    public const FIND_LIMIT = 15;
+
     public function describeSchema(?string $entryTypeHandle, ?User $user): array
     {
         if (!$user) {
@@ -769,35 +771,123 @@ class ContentDesigner extends Component
         });
     }
 
-    public function findElements(string $kind, string $title, ?User $user): array
+    /**
+     * @param array{section?: string, entryType?: string, status?: string, siteId?: int|string, volume?: string, folder?: string} $filters
+     * @return array{ok: true, elements: array<int, array<string, mixed>>}|array{ok: false, saved: false, error: string, errors?: array}
+     */
+    public function findElements(string $kind, string $query, ?User $user, array $filters = []): array
     {
         if (!$user) {
             return $this->fail('You need to be signed in.');
         }
 
-        $query = $kind === 'asset' ? Asset::find() : Entry::find();
-        if ($title !== '') {
-            $query->search($title);
-        }
-        $query->limit(10);
-
-        $results = [];
-        foreach ($query->all() as $element) {
-            if (Craft::$app->getElements()->canView($element, $user)) {
-                $row = [
-                    'id' => $element->id,
-                    'title' => (string)$element->title,
-                    'kind' => $kind === 'asset' ? 'asset' : 'entry',
-                ];
-                if ($element instanceof Entry) {
-                    $row['section'] = $element->getSection()?->handle;
-                    $row['entryType'] = $element->getType()->handle;
-                }
-                $results[] = $row;
-            }
-        }
+        $kind = $kind === 'asset' ? 'asset' : 'entry';
+        $query = trim($query);
+        $results = $kind === 'asset'
+            ? $this->findAssets($query, $filters, $user)
+            : $this->findEntries($query, $filters, $user);
 
         return ['ok' => true, 'elements' => $results];
+    }
+
+    /**
+     * @param array<string, mixed> $filters
+     * @return array<int, array<string, mixed>>
+     */
+    private function findEntries(string $query, array $filters, User $user): array
+    {
+        $elementQuery = Entry::find()->limit(self::FIND_LIMIT);
+        $status = isset($filters['status']) ? trim((string)$filters['status']) : '';
+        if ($status === '' || $status === 'any') {
+            $elementQuery->status(null);
+        } else {
+            $elementQuery->status($status);
+        }
+        if (!empty($filters['section'])) {
+            $elementQuery->section((string)$filters['section']);
+        }
+        if (!empty($filters['entryType'])) {
+            $elementQuery->type((string)$filters['entryType']);
+        }
+        if (isset($filters['siteId']) && $filters['siteId'] !== '' && $filters['siteId'] !== null) {
+            $elementQuery->siteId((int)$filters['siteId']);
+        }
+        if ($query !== '') {
+            $elementQuery->search($query);
+        }
+
+        $results = [];
+        foreach ($elementQuery->all() as $element) {
+            if (!$element instanceof Entry || !Craft::$app->getElements()->canView($element, $user)) {
+                continue;
+            }
+            $results[] = [
+                'id' => (int)$element->id,
+                'title' => (string)$element->title,
+                'kind' => 'entry',
+                'slug' => (string)$element->slug,
+                'status' => $element->getStatus(),
+                'section' => $element->getSection()?->handle,
+                'entryType' => $element->getType()->handle,
+            ];
+        }
+
+        return $results;
+    }
+
+    /**
+     * @param array<string, mixed> $filters
+     * @return array<int, array<string, mixed>>
+     */
+    private function findAssets(string $query, array $filters, User $user): array
+    {
+        $elementQuery = Asset::find()->status(null)->limit(self::FIND_LIMIT);
+        $volumeHandle = trim((string)($filters['volume'] ?? ''));
+        if ($volumeHandle !== '') {
+            $volume = Craft::$app->getVolumes()->getVolumeByHandle($volumeHandle);
+            if ($volume) {
+                $elementQuery->volumeId($volume->id);
+            } else {
+                return [];
+            }
+        }
+        $folderPath = trim((string)($filters['folder'] ?? ''));
+        if ($folderPath !== '' && $volumeHandle !== '') {
+            $volume = Craft::$app->getVolumes()->getVolumeByHandle($volumeHandle);
+            if ($volume) {
+                try {
+                    $folder = Craft::$app->getAssets()->ensureFolderByFullPathAndVolume($folderPath, $volume, false);
+                    $elementQuery->folderId($folder->id);
+                } catch (Throwable) {
+                    return [];
+                }
+            }
+        }
+        if ($query !== '') {
+            $elementQuery->search($query);
+        }
+
+        $results = [];
+        foreach ($elementQuery->all() as $element) {
+            if (!$element instanceof Asset || !Craft::$app->getElements()->canView($element, $user)) {
+                continue;
+            }
+            $thumbUrl = null;
+            try {
+                $thumbUrl = Craft::$app->getAssets()->getThumbUrl($element, 64, 64, false);
+            } catch (Throwable) {
+            }
+            $results[] = [
+                'id' => (int)$element->id,
+                'title' => (string)$element->title,
+                'kind' => 'asset',
+                'filename' => (string)$element->getFilename(),
+                'volume' => $element->getVolume()?->handle,
+                'thumbUrl' => $thumbUrl,
+            ];
+        }
+
+        return $results;
     }
 
     public function entryFromId(?int $id, ?int $draftId, ?int $siteId, ?User $user): ?Entry

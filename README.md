@@ -36,21 +36,51 @@ Turn **Enabled** off to hide the assistant. The settings screen stays available.
 - **Unpublish** disables the live entry when you ask. The chat stays bound to it.
 - **Delete** moves the entry to the trash when you ask, and clears that chat’s binding. Craft’s delete permission still applies.
 - **Padstone Mason → Usage** (admins) totals prompt and completion tokens by user, provider, and model for a date range. Rows are written only when the provider reports usage. Message text and API keys are not stored.
-- **Attach image** uploads files into the configured volume and links them to the chat. Pasted image URLs in a message are downloaded the same way. The assistant sees those asset ids and can place them in Assets fields on any number of blocks. It can also call `import_asset` for a new URL later in the chat.
+- **Attach image** uploads files into the configured volume and links them to the chat. Pasted image URLs in a message are downloaded the same way. The assistant sees those asset ids and can place them in Assets fields on any number of blocks. It can also call `import_asset` for a new URL later in the chat, `list_conversation_assets` to list linked images, and `update_asset_meta` for title/alt.
 
 Each person only sees their own chats. The assistant does not read unsaved changes in the entry form.
 
 ## What it can edit
 
-The fields on the entry's layout. Matrix fields, including Content Designer and the hero when those fields exist, can take their existing block types, including nested fields such as columns and cards. Other writable layout fields, such as the breadcrumb title, can be updated on the entry. Writable fields are plain text, CKEditor, lightswitch, dropdown, link, regex, and existing assets or entries by id (including conversation uploads).
+The fields on the entry's layout. Matrix fields, including Content Designer and the hero when those fields exist, can take their existing block types, including nested fields such as columns and cards. Other writable layout fields, such as the breadcrumb title, can be updated on the entry. Writable fields are plain text, CKEditor, lightswitch, dropdown, link, regex, and existing assets or entries by id (including conversation uploads). Link fields accept a URL string or a typed object (`url`, `entry`, `asset`, `email`). Relation writes must use elements allowed by the field's sources.
 
 Orientation and multi-block recipes use `summarize_page` (compact Matrix outline with min/max and short text signals) and `apply_blocks` (ordered add/update/remove/reorder ops in one call). `apply_blocks` stops on the first failure; earlier successful steps stay saved and the result reports each step. Single edits still use the atomic block tools.
 
+`find_elements` searches entries and assets with filters (section, entry type, status, site, volume, folder). Prefer `list_conversation_assets` for images already in the chat.
+
 A shared section is a relation to an existing shared block. Inner blocks are not copied.
+
+## Tools
+
+Mason picks these from the chat. Assistant replies show a **Tools used** footer when any ran. Sample prompts:
+
+| Tool | What it does | Sample prompt |
+|------|----------------|---------------|
+| `describe_schema` | Lists writable fields and block types for an entry type | “What block types can I add on a Basic Page?” |
+| `summarize_page` | Compact outline of Matrices, block ids/types, text signals, min/max | “What’s on this page right now?” |
+| `read_layout` | Full title, scalars, and block field values (with atMin/atMax) | “Show me the full field values on the first rich text block.” |
+| `create_page` | Creates an unpublished draft in an allowed section | “Create a Basic Page titled Contact in the pages section.” |
+| `apply_blocks` | Ordered add/update/remove/reorder in one call; stops on first failure | “Add rich text sections titled Intro and Details with short paragraphs.” |
+| `add_block` | Adds one Matrix block | “Add a rich text block at the top with headline Welcome.” |
+| `update_block` | Updates fields on one block (use when a Matrix field is at max) | “Change the hero headline to Welcome back.” |
+| `reorder_blocks` | Reorders sibling blocks | “Move the Details block above Intro.” |
+| `remove_block` | Removes one block (respects min counts) | “Remove the Details rich text block.” |
+| `update_entry` | Updates draft title, slug, parent, or scalar layout fields | “Set the breadcrumb title to About and turn breadcrumbs off.” |
+| `find_elements` | Finds entries/assets with filters (section, type, status, volume, folder) | “Find shared blocks named like Footer.” |
+| `rebind_entry` | Binds the chat to an existing entry (starts a Mason draft on edit) | “Edit the About page instead of this one.” |
+| `list_conversation_assets` | Lists images already linked to this chat | “What images are linked to this chat?” |
+| `update_asset_meta` | Sets asset title and/or alt | “Set alt text on the attached image to Team photo.” |
+| `import_asset` | Downloads an image URL into the configured volume and links it | “Import https://example.com/hero.png and put it on the logos field.” |
+| `publish_draft` | Publishes the bound Mason draft | “Publish this draft.” |
+| `unpublish_entry` | Disables the live entry (explicit ask only) | “Unpublish this page.” |
+| `delete_entry` | Trashes the entry and clears the binding (explicit ask only) | “Delete this entry.” |
+
+Refused (not available): `create_block_type`, `apply_project_config`, `mcp`, `upload_asset` (use chat attach or `import_asset`).
 
 ## What it will not do
 
 - Invent a block type, change project config, or put raw file bytes into field values.
+- Upload files through the model (`upload_asset` is refused). Chat attach and `import_asset` remain the ingest paths.
 - Write SEOmatic, code, or Pickture fields. Those are skipped and the rest of the update can still save.
 - Drop a nested Matrix field below its minimum or above its maximum. A two-column section needs both columns in the same save.
 - Publish, or edit an entry the current user cannot save.

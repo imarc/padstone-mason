@@ -6,6 +6,8 @@ use craft\base\ElementInterface;
 use craft\base\FieldInterface;
 use craft\ckeditor\Field as CkeditorField;
 use craft\elements\Asset;
+use craft\elements\Entry;
+use craft\elements\User;
 use craft\fields\Assets;
 use craft\fields\Dropdown;
 use craft\fields\Entries as EntriesField;
@@ -72,10 +74,12 @@ class FieldSupport
             return 'One of: ' . implode(', ', $values);
         }
         if ($field instanceof Link) {
-            return 'Object with type, value, and optional label. A URL string is accepted as a url link.';
+            $types = implode(', ', $field->types);
+
+            return 'URL string, or object {type, value, label?} where type is one of: ' . $types . '. For entry/asset types, value is an element id. Use find_elements when the user names a page or file without an id.';
         }
         if (self::isRelation($field)) {
-            return 'Existing element id, or a list of ids. Raw uploads in field values are refused; use conversation asset ids.';
+            return 'Existing element id, or a list of ids allowed by this field\'s sources. Raw uploads in field values are refused; use list_conversation_assets or import_asset, then pass those ids.';
         }
         if ($field instanceof CkeditorField) {
             return 'HTML string.';
@@ -87,7 +91,7 @@ class FieldSupport
     /**
      * @return array{status: string, value?: mixed, message?: string}
      */
-    public static function prepare(FieldInterface $field, mixed $value, ?\craft\elements\User $user): array
+    public static function prepare(FieldInterface $field, mixed $value, ?User $user): array
     {
         if (self::isMatrix($field)) {
             return [
@@ -128,14 +132,7 @@ class FieldSupport
         }
 
         if ($field instanceof Link) {
-            if (is_string($value)) {
-                return ['status' => 'ok', 'value' => ['type' => 'url', 'value' => $value]];
-            }
-            if (is_array($value)) {
-                return ['status' => 'ok', 'value' => $value];
-            }
-
-            return ['status' => 'fail', 'message' => $field->handle . ' expects a URL string or link object.'];
+            return self::prepareLink($field, $value, $user);
         }
 
         if ($field instanceof PlainText || $field instanceof CkeditorField || self::isRegex($field)) {
@@ -179,10 +176,17 @@ class FieldSupport
                 return [];
             }
 
-            return array_map(fn(ElementInterface $element) => [
-                'id' => $element->id,
-                'title' => $element->title ?? (string)$element,
-            ], $elements);
+            return array_map(function(ElementInterface $element) {
+                $row = [
+                    'id' => $element->id,
+                    'title' => $element->title ?? (string)$element,
+                ];
+                if ($element instanceof Entry) {
+                    $row['section'] = $element->getSection()?->handle;
+                }
+
+                return $row;
+            }, $elements);
         }
 
         if (is_bool($value) || is_int($value) || is_float($value) || is_string($value) || $value === null) {
@@ -231,7 +235,7 @@ class FieldSupport
     /**
      * @return array{status: string, value?: int[], message?: string}
      */
-    private static function prepareRelation(FieldInterface $field, mixed $value, ?\craft\elements\User $user): array
+    private static function prepareRelation(FieldInterface $field, mixed $value, ?User $user): array
     {
         $ids = is_array($value) ? $value : [$value];
         $normalized = [];
@@ -256,9 +260,168 @@ class FieldSupport
                 return ['status' => 'fail', 'message' => 'You cannot view that related element.'];
             }
 
+            if (!self::relationAllowedBySources($field, $element)) {
+                return [
+                    'status' => 'fail',
+                    'message' => $field->handle . " element $id is not allowed by that field's sources.",
+                ];
+            }
+
             $normalized[] = (int)$element->id;
         }
 
         return ['status' => 'ok', 'value' => $normalized];
+    }
+
+    private static function relationAllowedBySources(FieldInterface $field, ElementInterface $element): bool
+    {
+        // Use the configured sources property — Assets::getInputSources() can touch the
+        // web session, which is unavailable in console checks.
+        if ($field instanceof Assets && $element instanceof Asset) {
+            $sources = $field->sources;
+            if ($sources === '*' || $sources === null) {
+                return true;
+            }
+            if (!is_array($sources) || $sources === []) {
+                return false;
+            }
+
+            $volume = $element->getVolume();
+            $volumeKey = $volume ? 'volume:' . $volume->uid : null;
+            $folder = $element->getFolder();
+            $folderUid = $folder?->uid;
+
+            foreach ($sources as $source) {
+                if (!is_string($source)) {
+                    continue;
+                }
+                if ($source === '*') {
+                    return true;
+                }
+                if ($volumeKey && $source === $volumeKey) {
+                    return true;
+                }
+                if ($folderUid && str_starts_with($source, 'folder:') && $source === 'folder:' . $folderUid) {
+                    return true;
+                }
+                if ($folder && $folderUid && str_starts_with($source, 'folder:')) {
+                    $sourceFolder = Craft::$app->getAssets()->getFolderByUid(substr($source, strlen('folder:')));
+                    if ($sourceFolder && self::folderIsUnder($folder, $sourceFolder)) {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        if ($field instanceof EntriesField && $element instanceof Entry) {
+            $sources = $field->sources;
+            if ($sources === '*' || $sources === null) {
+                return true;
+            }
+            if (!is_array($sources) || $sources === []) {
+                return false;
+            }
+
+            $section = $element->getSection();
+            $sectionKey = $section ? 'section:' . $section->uid : null;
+            foreach ($sources as $source) {
+                if (!is_string($source)) {
+                    continue;
+                }
+                if ($source === '*') {
+                    return true;
+                }
+                if ($sectionKey && $source === $sectionKey) {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        return true;
+    }
+
+    private static function folderIsUnder(\craft\models\VolumeFolder $folder, \craft\models\VolumeFolder $ancestor): bool
+    {
+        if ((int)$folder->id === (int)$ancestor->id) {
+            return true;
+        }
+        $path = (string)$folder->path;
+        $ancestorPath = (string)$ancestor->path;
+        if ($ancestorPath === '') {
+            return (int)$folder->volumeId === (int)$ancestor->volumeId;
+        }
+
+        return (int)$folder->volumeId === (int)$ancestor->volumeId
+            && ($path === $ancestorPath || str_starts_with($path, rtrim($ancestorPath, '/') . '/'));
+    }
+
+    /**
+     * @return array{status: string, value?: array<string, mixed>, message?: string}
+     */
+    private static function prepareLink(Link $field, mixed $value, ?User $user): array
+    {
+        if (is_string($value)) {
+            if (!in_array('url', $field->types, true)) {
+                return ['status' => 'fail', 'message' => $field->handle . ' does not allow url links.'];
+            }
+
+            return ['status' => 'ok', 'value' => ['type' => 'url', 'value' => $value]];
+        }
+
+        if (!is_array($value)) {
+            return ['status' => 'fail', 'message' => $field->handle . ' expects a URL string or link object.'];
+        }
+
+        $type = (string)($value['type'] ?? '');
+        if ($type === '' || !in_array($type, $field->types, true)) {
+            return [
+                'status' => 'fail',
+                'message' => $field->handle . ' does not allow that link type. Allowed: ' . implode(', ', $field->types) . '.',
+            ];
+        }
+
+        $payload = [
+            'type' => $type,
+            'value' => $value['value'] ?? '',
+        ];
+        if (array_key_exists('label', $value)) {
+            $payload['label'] = $value['label'];
+        }
+
+        if (in_array($type, ['entry', 'asset'], true)) {
+            $id = $payload['value'];
+            if (is_array($id) && isset($id['id'])) {
+                $id = $id['id'];
+            }
+            // Craft stores element links as {entry:ID@siteId:url} / {asset:ID@siteId:url}.
+            if (is_string($id) && preg_match('/^\{(entry|asset):(\d+)(?:@(\d+))?:url\}$/', $id, $match)) {
+                $id = (int)$match[2];
+            }
+            if (!is_numeric($id)) {
+                return ['status' => 'fail', 'message' => $field->handle . " $type links require an element id."];
+            }
+            $element = $type === 'asset'
+                ? Asset::find()->id((int)$id)->status(null)->one()
+                : Entry::find()->id((int)$id)->status(null)->site('*')->one();
+            if (!$element) {
+                return ['status' => 'fail', 'message' => $field->handle . " $type target $id was not found."];
+            }
+            if ($user && !Craft::$app->getElements()->canView($element, $user)) {
+                return ['status' => 'fail', 'message' => 'You cannot view that link target.'];
+            }
+            $refHandle = $type === 'asset' ? 'asset' : 'entry';
+            $payload['value'] = sprintf('{%s:%d@%d:url}', $refHandle, (int)$element->id, (int)$element->siteId);
+        } elseif (in_array($type, ['url', 'email'], true)) {
+            $payload['value'] = (string)$payload['value'];
+            if (trim($payload['value']) === '') {
+                return ['status' => 'fail', 'message' => $field->handle . " $type links require a value."];
+            }
+        }
+
+        return ['status' => 'ok', 'value' => $payload];
     }
 }

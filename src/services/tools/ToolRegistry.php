@@ -101,6 +101,8 @@ class ToolRegistry
             new UpdateEntry($drafts),
             new RebindEntry($drafts),
             new FindElements($drafts),
+            new ListConversationAssets($drafts),
+            new UpdateAssetMeta($drafts),
             new ImportAsset($drafts),
             new PublishDraft($drafts),
             new UnpublishEntry($drafts),

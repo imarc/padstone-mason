@@ -13,10 +13,13 @@ use GuzzleHttp\HandlerStack;
 use GuzzleHttp\Middleware;
 use GuzzleHttp\Psr7\Response;
 use craft\web\View;
+use craft\fields\Assets as AssetsField;
 use imarc\padstonemason\controllers\ChatController;
 use imarc\padstonemason\controllers\UsageController;
 use imarc\padstonemason\models\Settings;
 use imarc\padstonemason\Plugin;
+use imarc\padstonemason\services\ContentDesigner;
+use imarc\padstonemason\services\FieldSupport;
 use imarc\padstonemason\records\ConversationAssetRecord;
 use imarc\padstonemason\records\ConversationRecord;
 use imarc\padstonemason\records\MessageRecord;
@@ -59,6 +62,11 @@ class CheckController extends Controller
 
         Craft::$app->getUser()->setIdentity($admin);
         $plugin = Plugin::getInstance();
+        if (!$plugin) {
+            $this->stderr("Padstone Mason plugin is not loaded.\n");
+
+            return ExitCode::UNSPECIFIED_ERROR;
+        }
 
         try {
             $this->checkSettingsShape();
@@ -69,6 +77,7 @@ class CheckController extends Controller
             $this->checkEditing($plugin, $admin);
             $this->checkSummarizeAndApply($plugin, $admin);
             $this->checkConversationAssets($plugin, $admin);
+            $this->checkMediaAndRelations($plugin, $admin);
             $this->checkUnpublishAndDelete($plugin, $admin);
             $this->checkAssistantLoop($plugin, $admin);
             $this->checkConversations($plugin, $admin);
@@ -1764,6 +1773,241 @@ class CheckController extends Controller
             || empty($afterUpdate['matrices']['hero']['atMax'])
         ) {
             $this->failures[] = 'apply_blocks update-at-max failed: ' . json_encode($updateMax) . ' ' . json_encode($afterUpdate['matrices']['hero'] ?? []);
+        }
+    }
+
+    private function checkMediaAndRelations(Plugin $plugin, User $admin): void
+    {
+        Craft::$app->getUser()->setIdentity($admin);
+
+        $tools = $plugin->assistant->tools();
+        $names = array_column($tools, 'name');
+        $byName = [];
+        foreach ($tools as $tool) {
+            $byName[$tool['name']] = $tool;
+        }
+        $prompt = (new ReflectionMethod($plugin->assistant, 'systemPrompt'))->invoke(
+            $plugin->assistant,
+            new ConversationRecord(),
+            $admin,
+        );
+        if (
+            !in_array('list_conversation_assets', $names, true)
+            || !in_array('update_asset_meta', $names, true)
+            || !is_string($prompt)
+            || !str_contains($prompt, 'list_conversation_assets')
+            || !str_contains($prompt, 'update_asset_meta')
+            || !str_contains($prompt, 'find_elements with filters')
+            || !str_contains((string)($byName['find_elements']['description'] ?? ''), 'section')
+            || !str_contains((string)($byName['list_conversation_assets']['description'] ?? ''), 'linked to this conversation')
+        ) {
+            $this->failures[] = 'Media/relation tools or prompt preferences are missing.';
+        }
+        if (ContentDesigner::FIND_LIMIT < 1 || ContentDesigner::FIND_LIMIT > 50) {
+            $this->failures[] = 'findElements limit is not a modest positive page size.';
+        }
+
+        try {
+            $shared = $this->sharedEntry($admin);
+        } catch (\Throwable $e) {
+            $this->failures[] = $e->getMessage();
+
+            return;
+        }
+        $foundShared = $plugin->contentDesigner->findElements('entry', (string)$shared->title, $admin, [
+            'section' => 'sharedBlocks',
+            'status' => 'any',
+        ]);
+        $sharedIds = array_column($foundShared['elements'] ?? [], 'id');
+        if (empty($foundShared['ok']) || !in_array((int)$shared->id, $sharedIds, true)) {
+            $this->failures[] = 'Filtered find_elements did not return the shared block: ' . json_encode($foundShared);
+        }
+        $row = null;
+        foreach ($foundShared['elements'] ?? [] as $element) {
+            if ((int)($element['id'] ?? 0) === (int)$shared->id) {
+                $row = $element;
+                break;
+            }
+        }
+        if (!$row || ($row['section'] ?? null) !== 'sharedBlocks' || empty($row['slug'])) {
+            $this->failures[] = 'find_elements entry rows are missing section/slug: ' . json_encode($row);
+        }
+
+        $missingVolume = $plugin->contentDesigner->findElements('asset', 'anything', $admin, [
+            'volume' => 'not-a-real-volume-handle',
+        ]);
+        if (empty($missingVolume['ok']) || ($missingVolume['elements'] ?? null) !== []) {
+            $this->failures[] = 'Unknown volume search should return no assets: ' . json_encode($missingVolume);
+        }
+
+        $settings = $plugin->getSettings();
+        $volume = $settings->assetVolume();
+        if (!$volume) {
+            $this->failures[] = 'No asset volume for media checks.';
+
+            return;
+        }
+
+        $png = base64_decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==');
+        $temp = Craft::$app->getPath()->getTempPath() . '/padstone-mason-media-' . uniqid() . '.png';
+        file_put_contents($temp, $png);
+        $uploaded = $plugin->conversationAssets->uploadFromRequest(new UploadedFile([
+            'name' => 'mason-media-check.png',
+            'tempName' => $temp,
+            'type' => 'image/png',
+            'size' => filesize($temp),
+            'error' => UPLOAD_ERR_OK,
+        ]), $admin);
+        if (empty($uploaded['ok'])) {
+            $this->failures[] = 'Could not upload media-check image: ' . ($uploaded['error'] ?? '');
+
+            return;
+        }
+        $assetId = (int)$uploaded['assetId'];
+        $this->assetIds[] = $assetId;
+
+        $foundAsset = $plugin->contentDesigner->findElements('asset', 'mason-media-check', $admin, [
+            'volume' => $volume->handle,
+        ]);
+        $assetIds = array_column($foundAsset['elements'] ?? [], 'id');
+        if (empty($foundAsset['ok']) || !in_array($assetId, $assetIds, true)) {
+            $this->failures[] = 'Filtered asset find did not return the uploaded file: ' . json_encode($foundAsset);
+        }
+
+        $chat = $this->startedConversation($plugin, $admin, null);
+        if (!$chat) {
+            return;
+        }
+        $attached = $plugin->conversationAssets->attach($chat, [$assetId], $admin);
+        if (empty($attached['ok'])) {
+            $this->failures[] = 'Could not attach media-check asset: ' . ($attached['error'] ?? '');
+
+            return;
+        }
+
+        $listed = $plugin->assistant->execute('list_conversation_assets', [], $chat, $admin);
+        $listedIds = array_column($listed['assets'] ?? [], 'id');
+        if (empty($listed['ok']) || !in_array($assetId, $listedIds, true)) {
+            $this->failures[] = 'list_conversation_assets missed the linked asset: ' . json_encode($listed);
+        }
+
+        $meta = $plugin->assistant->execute('update_asset_meta', [
+            'assetId' => $assetId,
+            'alt' => 'Mason media alt',
+            'title' => 'Mason media title',
+        ], $chat, $admin);
+        $asset = Asset::find()->id($assetId)->status(null)->one();
+        if (
+            empty($meta['ok'])
+            || empty($meta['saved'])
+            || !$asset instanceof Asset
+            || (string)$asset->alt !== 'Mason media alt'
+            || (string)$asset->title !== 'Mason media title'
+        ) {
+            $this->failures[] = 'update_asset_meta failed: ' . json_encode($meta);
+        }
+
+        $viewer = $this->viewer($admin);
+        $this->withPermissionChecks(function() use ($plugin, $viewer, $chat, $assetId): void {
+            if (!in_array((int)$viewer->id, $this->userIds, true)) {
+                return;
+            }
+            Craft::$app->getUser()->setIdentity($viewer);
+            $denied = $plugin->assistant->execute('update_asset_meta', [
+                'assetId' => $assetId,
+                'alt' => 'Should not save',
+            ], $chat, $viewer);
+            if (!empty($denied['ok'])) {
+                $this->failures[] = 'A view-only user updated asset metadata.';
+            }
+        });
+        Craft::$app->getUser()->setIdentity($admin);
+
+        $allowedField = new AssetsField();
+        $allowedField->handle = 'logosAllowed';
+        $allowedField->sources = ['volume:' . $volume->uid];
+        $okRelation = FieldSupport::prepare($allowedField, [$assetId], $admin);
+        if (($okRelation['status'] ?? null) !== 'ok') {
+            $this->failures[] = 'In-source asset relation was refused: ' . json_encode($okRelation);
+        }
+
+        $otherUid = '00000000-0000-0000-0000-000000000000';
+        foreach (Craft::$app->getVolumes()->getAllVolumes() as $candidate) {
+            if ($candidate->uid !== $volume->uid) {
+                $otherUid = $candidate->uid;
+                break;
+            }
+        }
+        $deniedField = new AssetsField();
+        $deniedField->handle = 'logosDenied';
+        $deniedField->sources = ['volume:' . $otherUid];
+        $badRelation = FieldSupport::prepare($deniedField, [$assetId], $admin);
+        if (($badRelation['status'] ?? null) !== 'fail' || !str_contains((string)($badRelation['message'] ?? ''), 'sources')) {
+            $this->failures[] = 'Out-of-source asset relation was not refused: ' . json_encode($badRelation);
+        }
+
+        $created = $plugin->contentDesigner->createPage([
+            'title' => 'Assistant check media relations',
+            'section' => 'pages',
+            'entryType' => 'basicPage',
+            'slug' => 'assistant-check-media-rel-' . uniqid(),
+        ], $admin);
+        if (empty($created['ok'])) {
+            $this->failures[] = 'Could not create page for link checks: ' . ($created['error'] ?? '');
+
+            return;
+        }
+        $this->elementIds[] = (int)$created['entryId'];
+        $draft = $plugin->contentDesigner->entryFromId((int)$created['entryId'], (int)$created['draftId'], null, $admin);
+        $linkTarget = Entry::find()->section('pages')->status(null)->id(['not', (int)$created['entryId']])->one();
+        if (!$linkTarget instanceof Entry) {
+            $linkTarget = $draft;
+        }
+        $hero = $draft ? $plugin->contentDesigner->addBlock($draft, 'hero', 'standardHero', null, [
+            'heroEyebrow' => 'Link',
+            'heroHeadline' => 'Link check',
+            'heroContent' => '<p>Link body</p>',
+            'ctaLink' => [
+                'type' => 'entry',
+                'value' => (string)$linkTarget->id,
+                'label' => 'Target',
+            ],
+        ], [], $admin) : ['ok' => false];
+        $draft = $plugin->contentDesigner->entryFromId((int)$created['entryId'], (int)$created['draftId'], null, $admin);
+        $layout = $draft ? $plugin->contentDesigner->readLayout($draft, $admin) : [];
+        $cta = $layout['matrices']['hero']['blocks'][0]['fields']['ctaLink'] ?? null;
+        // LinkData::getValue() for entry links surfaces the resolved URL; type stays "entry".
+        if (
+            empty($hero['ok'])
+            || !is_array($cta)
+            || ($cta['type'] ?? null) !== 'entry'
+            || trim((string)($cta['value'] ?? '')) === ''
+            || ($cta['label'] ?? null) !== 'Target'
+        ) {
+            $this->failures[] = 'Entry-typed Link write failed: ' . json_encode($hero) . ' ' . json_encode($cta);
+        }
+
+        $heroBlockId = (int)($layout['matrices']['hero']['blocks'][0]['id'] ?? 0);
+        $heroBlock = $draft && $heroBlockId
+            ? $plugin->contentDesigner->findBlockOnEntry($draft, $heroBlockId)
+            : null;
+        $badLink = $heroBlock
+            ? $plugin->contentDesigner->updateBlock(
+                $heroBlock,
+                ['ctaLink' => ['type' => 'entry', 'value' => '999999999']],
+                $admin,
+            )
+            : ['ok' => true];
+        if (!empty($badLink['ok'])) {
+            $this->failures[] = 'Invalid entry Link target was accepted: ' . json_encode($badLink);
+        }
+
+        $entriesField = new \craft\fields\Entries();
+        $entriesField->handle = 'tmpEntriesRead';
+        $entriesField->sources = '*';
+        $read = FieldSupport::readValue($entriesField, [$shared]);
+        if (($read[0]['section'] ?? null) !== 'sharedBlocks' || ($read[0]['id'] ?? null) != $shared->id) {
+            $this->failures[] = 'Relation readback missing section: ' . json_encode($read);
         }
     }
 
