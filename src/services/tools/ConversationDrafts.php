@@ -2,6 +2,7 @@
 
 namespace imarc\padstonemason\services\tools;
 
+use craft\base\ElementInterface;
 use craft\elements\Entry;
 use craft\elements\User;
 use imarc\padstonemason\Plugin;
@@ -58,13 +59,22 @@ class ConversationDrafts
     public function ownerForField(ConversationRecord $conversation, User $user, mixed $parentId): Entry|array
     {
         if ($parentId) {
-            return $this->ownedBlock($conversation, $user, (int)$parentId);
+            $block = $this->ownedBlock($conversation, $user, (int)$parentId);
+            if (!$block instanceof Entry) {
+                if (is_array($block)) {
+                    return $block;
+                }
+
+                return ['ok' => false, 'saved' => false, 'error' => 'Nested blocks under that parent are not supported for this field type.'];
+            }
+
+            return $block;
         }
 
         return $this->editableDraft($conversation, $user);
     }
 
-    public function ownedBlock(ConversationRecord $conversation, User $user, int $blockId): Entry|array
+    public function ownedBlock(ConversationRecord $conversation, User $user, int $blockId): ElementInterface|array
     {
         $draft = $this->editableDraft($conversation, $user);
         if (!$draft instanceof Entry) {
@@ -72,7 +82,7 @@ class ConversationDrafts
         }
 
         $block = Plugin::getInstance()->contentDesigner->findBlockOnEntry($draft, $blockId);
-        if (!$block instanceof Entry) {
+        if (!$block) {
             return ['ok' => false, 'saved' => false, 'error' => 'That block is not on this draft.'];
         }
 

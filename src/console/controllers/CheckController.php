@@ -277,6 +277,22 @@ class CheckController extends Controller
     private function checkEditing(Plugin $plugin, User $admin): void
     {
         Craft::$app->getUser()->setIdentity($admin);
+
+        $matrixAdapter = null;
+        foreach ($plugin->structureAdapters->all() as $adapter) {
+            if ($adapter instanceof \imarc\padstonemason\services\structure\MatrixStructureAdapter) {
+                $matrixAdapter = $adapter;
+                break;
+            }
+        }
+        if (!$matrixAdapter) {
+            $this->failures[] = 'Structure adapter registry is missing the built-in Matrix adapter.';
+        }
+        $breadcrumb = Craft::$app->getFields()->getFieldByHandle('breadcrumbTitle');
+        if ($breadcrumb && $plugin->structureAdapters->forField($breadcrumb)) {
+            $this->failures[] = 'A non-structure field was incorrectly claimed by a structure adapter.';
+        }
+
         $schema = $plugin->contentDesigner->describeSchema('basicPage', $admin);
         if (empty($schema['ok'])) {
             $this->failures[] = 'Schema discovery failed: ' . ($schema['error'] ?? '');

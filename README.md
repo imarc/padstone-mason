@@ -1,6 +1,10 @@
 # Padstone Mason (Wildly Experimental)
 
-Control-panel chat for entries the current user can save. It edits the fields on that entry's layout, including Matrix fields such as the hero and Content Designer when they are present. New entries can be created only in the sections listed in settings. If a request does not name one allowed section and one entry type on it, Mason asks which to use and shows the sections and entry types it knows. Edits go to a named draft called **Mason**. A second chat on the same entry gets the next numbered draft, such as **Mason 2**. Nothing goes live until someone publishes that draft.
+Control-panel chat for entries the current user can save. It edits the fields on that entry's layout, including structure fields such as the hero and Content Designer (Matrix by default; Neo via the optional `padstone-mason-neo` companion) when they are present. New entries can be created only in the sections listed in settings. If a request does not name one allowed section and one entry type on it, Mason asks which to use and shows the sections and entry types it knows. Edits go to a named draft called **Mason**. A second chat on the same entry gets the next numbered draft, such as **Mason 2**. Nothing goes live until someone publishes that draft.
+
+## Neo Content Designer
+
+Sites that still use Spicy Web Neo for Content Designer should also install the companion package `imarc/craft-padstone-mason-neo` (Neo `^5.2`). Core Mason stays Matrix-only and does not require Neo. See `plugins/padstone-mason-neo/README.md` for install order and top-level v1 limits.
 
 ## Setup
 
@@ -42,9 +46,9 @@ Each person only sees their own chats. The assistant does not read unsaved chang
 
 ## What it can edit
 
-The fields on the entry's layout. Matrix fields, including Content Designer and the hero when those fields exist, can take their existing block types, including nested fields such as columns and cards. Other writable layout fields, such as the breadcrumb title, can be updated on the entry. Writable fields are plain text, CKEditor, lightswitch, dropdown, link, regex, and existing assets or entries by id (including conversation uploads). Link fields accept a URL string or a typed object (`url`, `entry`, `asset`, `email`). Relation writes must use elements allowed by the field's sources.
+The fields on the entry's layout. Structure fields, including Content Designer and the hero when those fields exist, can take their existing block types, including nested Matrix fields such as columns and cards. Other writable layout fields, such as the breadcrumb title, can be updated on the entry. Writable fields are plain text, CKEditor, lightswitch, dropdown, link, regex, and existing assets or entries by id (including conversation uploads). Link fields accept a URL string or a typed object (`url`, `entry`, `asset`, `email`). Relation writes must use elements allowed by the field's sources.
 
-Orientation and multi-block recipes use `summarize_page` (compact Matrix outline with min/max and short text signals) and `apply_blocks` (ordered add/update/remove/reorder ops in one call). `apply_blocks` stops on the first failure; earlier successful steps stay saved and the result reports each step. Single edits still use the atomic block tools.
+Orientation and multi-block recipes use `summarize_page` (compact structure outline with min/max and short text signals) and `apply_blocks` (ordered add/update/remove/reorder ops in one call). `apply_blocks` stops on the first failure; earlier successful steps stay saved and the result reports each step. Single edits still use the atomic block tools.
 
 `find_elements` searches entries and assets with filters (section, entry type, status, site, volume, folder). Prefer `list_conversation_assets` for images already in the chat.
 
@@ -61,8 +65,8 @@ Mason picks these from the chat. Assistant replies show a **Tools used** footer 
 | `read_layout` | Full title, scalars, and block field values (with atMin/atMax) | “Show me the full field values on the first rich text block.” |
 | `create_page` | Creates an unpublished draft in an allowed section | “Create a Basic Page titled Contact in the pages section.” |
 | `apply_blocks` | Ordered add/update/remove/reorder in one call; stops on first failure | “Add rich text sections titled Intro and Details with short paragraphs.” |
-| `add_block` | Adds one Matrix block | “Add a rich text block at the top with headline Welcome.” |
-| `update_block` | Updates fields on one block (use when a Matrix field is at max) | “Change the hero headline to Welcome back.” |
+| `add_block` | Adds one structure block | “Add a rich text block at the top with headline Welcome.” |
+| `update_block` | Updates fields on one block (use when a structure field is at max) | “Change the hero headline to Welcome back.” |
 | `reorder_blocks` | Reorders sibling blocks | “Move the Details block above Intro.” |
 | `remove_block` | Removes one block (respects min counts) | “Remove the Details rich text block.” |
 | `update_entry` | Updates draft title, slug, parent, or scalar layout fields | “Set the breadcrumb title to About and turn breadcrumbs off.” |

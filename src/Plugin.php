@@ -20,11 +20,13 @@ use imarc\padstonemason\services\ContentDesigner;
 use imarc\padstonemason\services\ConversationAssets;
 use imarc\padstonemason\services\Conversations;
 use imarc\padstonemason\services\Usage;
+use imarc\padstonemason\services\structure\StructureAdapters;
 use imarc\padstonemason\web\assets\assistant\AssistantAsset;
 use yii\base\Event;
 
 /**
  * @property ContentDesigner $contentDesigner
+ * @property StructureAdapters $structureAdapters
  * @property Assistant $assistant
  * @property Conversations $conversations
  * @property ConversationAssets $conversationAssets
@@ -47,6 +49,7 @@ class Plugin extends BasePlugin
 
         $this->setComponents([
             'contentDesigner' => ContentDesigner::class,
+            'structureAdapters' => StructureAdapters::class,
             'assistant' => Assistant::class,
             'conversations' => Conversations::class,
             'conversationAssets' => ConversationAssets::class,

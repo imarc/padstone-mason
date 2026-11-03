@@ -18,7 +18,11 @@ use craft\helpers\ElementHelper;
 use craft\helpers\UrlHelper;
 use craft\models\EntryType;
 use craft\models\Section;
+use craft\base\ElementInterface;
+use craft\base\FieldInterface as CraftFieldInterface;
 use imarc\padstonemason\Plugin;
+use imarc\padstonemason\services\structure\StructureHelpers;
+use imarc\padstonemason\services\structure\StructureAdapterInterface;
 use Throwable;
 
 class ContentDesigner extends Component
@@ -26,6 +30,18 @@ class ContentDesigner extends Component
     public const UNRESOLVED_MESSAGE = 'Ask the admin which section and entry type to use, and include these sections and entry types in the question. Do not say the request is impossible or a project config change.';
 
     public const FIND_LIMIT = 15;
+
+    private ?StructureHelpers $_helpers = null;
+
+    private function helpers(): StructureHelpers
+    {
+        return $this->_helpers ??= new StructureHelpers();
+    }
+
+    private function adapters()
+    {
+        return Plugin::getInstance()->structureAdapters;
+    }
 
     public function describeSchema(?string $entryTypeHandle, ?User $user): array
     {
@@ -39,13 +55,17 @@ class ContentDesigner extends Component
         }
 
         $field = $this->contentDesignerField($entryType);
+        $adapter = $field ? $this->adapters()->forField($field) : null;
 
         return [
             'ok' => true,
             'entryType' => $entryType->handle,
             'field' => $field?->handle,
-            'blockTypes' => $field ? $this->describeMatrix($field) : [],
-            'layoutFields' => $this->describeFields($entryType),
+            'blockTypes' => ($field && $adapter) ? $adapter->describeTypes($field) : [],
+            'layoutFields' => $this->helpers()->describeFields(
+                $entryType,
+                fn(Matrix $nested) => $this->adapters()->forField($nested)?->describeTypes($nested) ?? [],
+            ),
         ];
     }
 
@@ -76,23 +96,13 @@ class ContentDesigner extends Component
         }
 
         $matrices = [];
-        foreach ($this->customFields($entry->getType()) as $custom) {
+        foreach ($this->helpers()->customFields($entry->getType()) as $custom) {
             $field = $custom['field'];
-            if (!$field instanceof Matrix) {
+            $adapter = $this->adapters()->forField($field);
+            if (!$adapter) {
                 continue;
             }
-            $blocks = $this->blocks($entry, $field);
-            $count = count($blocks);
-            $meta = $this->matrixMeta($field, $count);
-            $items = [];
-            foreach ($blocks as $block) {
-                $items[] = [
-                    'id' => (int)$block->id,
-                    'type' => $block->getType()->handle,
-                    'signal' => $this->blockSignal($block),
-                ];
-            }
-            $matrices[$field->handle] = $meta + ['blocks' => $items];
+            $matrices[$field->handle] = $adapter->summarizeField($entry, $field);
         }
 
         return [
@@ -362,224 +372,47 @@ class ContentDesigner extends Component
 
     public function addBlock(Entry $owner, string $fieldHandle, string $typeHandle, ?int $position, array $values, array $nested, ?User $user): array
     {
-        $guard = $this->guardDraftMutation($owner, $user);
-        if (!$guard['ok']) {
-            return $guard;
+        $resolved = $this->structureFieldOn($owner, $fieldHandle);
+        if (!$resolved['ok']) {
+            return $resolved;
         }
 
-        $field = $this->matrixOn($owner, $fieldHandle);
-        if (!$field) {
-            $handles = $this->matrixHandles($owner);
+        /** @var CraftFieldInterface $field */
+        $field = $resolved['field'];
+        /** @var StructureAdapterInterface $adapter */
+        $adapter = $resolved['adapter'];
 
-            return $this->fail('That Matrix field is not on the owner. Matrix fields on this layout: ' . ($handles === [] ? 'none' : implode(', ', $handles)) . '.');
-        }
-
-        $type = $this->typeOnField($field, $typeHandle);
-        if (!$type) {
-            return $this->fail('That block type is not available.');
-        }
-
-        $prepared = $this->prepareFieldValues($type, $values, $user);
-        if (!$prepared['ok']) {
-            return $prepared;
-        }
-
-        $nestedResult = $this->buildNestedPayload($type, $nested, $user);
-        if (!$nestedResult['ok']) {
-            return $nestedResult;
-        }
-
-        $count = count($this->blockIds($owner, $field));
-        if ($field->maxEntries && $count >= (int)$field->maxEntries) {
-            return $this->fail($field->handle . ' allows at most ' . $field->maxEntries . ' entries.');
-        }
-
-        $fields = $prepared['fields'] + $nestedResult['fields'];
-
-        return $this->mutate(function() use ($owner, $field, $typeHandle, $position, $fields, $prepared) {
-            [$entries, $sort] = $this->payload($owner, $field);
-            $key = 'new1';
-            $entries[$key] = [
-                'type' => $typeHandle,
-                'fields' => $fields,
-            ];
-            if ($position === null || $position >= count($sort)) {
-                $sort[] = $key;
-            } else {
-                array_splice($sort, max(0, $position), 0, [$key]);
-            }
-
-            $before = $this->blockIds($owner, $field);
-            $saved = $this->saveOwner($owner, $field, $entries, $sort);
-            if (!$saved['ok']) {
-                return $saved;
-            }
-
-            $owner = $saved['entry'];
-            $after = $this->blocks($owner, $field);
-            $created = null;
-            foreach ($after as $block) {
-                if (!in_array($block->id, $before, true)) {
-                    $created = $block;
-                    break;
-                }
-            }
-
-            return array_merge([
-                'ok' => true,
-                'saved' => true,
-                'blockId' => $created?->id,
-                'type' => $typeHandle,
-                'skipped' => $prepared['skipped'],
-                'blocks' => $this->readBlocks($owner, $field),
-            ], $this->previewPayload($this->rootEntry($owner)));
-        });
+        return $adapter->addBlock($owner, $field, $typeHandle, $position, $values, $nested, $user);
     }
 
-    public function updateBlock(Entry $block, array $values, ?User $user): array
+    public function updateBlock(ElementInterface $block, array $values, ?User $user): array
     {
-        $owner = $block->getOwner();
-        if (!$owner instanceof Entry) {
-            return $this->fail('That block has no owner.');
-        }
-
-        $guard = $this->guardDraftMutation($owner, $user);
-        if (!$guard['ok']) {
-            return $guard;
-        }
-
-        $field = $block->getField();
-        if (!$field instanceof Matrix) {
+        $adapter = $this->adapters()->adapterForBlock($block);
+        if (!$adapter) {
             return $this->fail('That element is not a Content Designer block.');
         }
 
-        $type = $block->getType();
-        $prepared = $this->prepareFieldValues($type, $values, $user);
-        if (!$prepared['ok']) {
-            return $prepared;
-        }
-
-        if ($prepared['fields'] === [] && $prepared['skipped'] !== []) {
-            return [
-                'ok' => true,
-                'saved' => false,
-                'skipped' => $prepared['skipped'],
-                'blocks' => $this->readBlocks($owner, $field),
-            ];
-        }
-
-        if ($prepared['fields'] === []) {
-            return $this->fail('Nothing to update.');
-        }
-
-        $canonical = $this->rootEntry($owner)->getCanonical(true);
-        $beforeCanonical = $this->snapshot($canonical);
-
-        return $this->mutate(function() use ($owner, $field, $block, $prepared, $canonical, $beforeCanonical) {
-            [$entries, $sort] = $this->payload($owner, $field);
-            $id = (string)$block->id;
-            if (!isset($entries[$id])) {
-                return $this->fail('That block is not in the field.');
-            }
-            $entries[$id]['fields'] = $prepared['fields'];
-            $saved = $this->saveOwner($owner, $field, $entries, $sort);
-            if (!$saved['ok']) {
-                return $saved;
-            }
-
-            $after = $this->snapshot($this->reload($canonical));
-            if ($after !== $beforeCanonical && !$canonical->getIsUnpublishedDraft()) {
-                return $this->fail('The live entry changed unexpectedly.');
-            }
-
-            return array_merge([
-                'ok' => true,
-                'saved' => true,
-                'blockId' => $block->id,
-                'skipped' => $prepared['skipped'],
-                'blocks' => $this->readBlocks($saved['entry'], $field),
-            ], $this->previewPayload($this->rootEntry($saved['entry'])));
-        });
+        return $adapter->updateBlock($block, $values, $user);
     }
 
     public function reorderBlocks(Entry $owner, string $fieldHandle, array $orderedIds, ?User $user): array
     {
-        $guard = $this->guardDraftMutation($owner, $user);
-        if (!$guard['ok']) {
-            return $guard;
+        $resolved = $this->structureFieldOn($owner, $fieldHandle);
+        if (!$resolved['ok']) {
+            return $resolved;
         }
 
-        $field = $this->matrixOn($owner, $fieldHandle);
-        if (!$field) {
-            return $this->fail('That Matrix field is not on the owner.');
-        }
-
-        $current = array_map('strval', $this->blockIds($owner, $field));
-        $ordered = array_map('strval', $orderedIds);
-        $currentSorted = $current;
-        $orderedSorted = $ordered;
-        sort($currentSorted);
-        sort($orderedSorted);
-        if ($currentSorted !== $orderedSorted || count($ordered) !== count(array_unique($ordered))) {
-            return $this->fail('That order is invalid.');
-        }
-
-        return $this->mutate(function() use ($owner, $field, $ordered) {
-            [$entries] = $this->payload($owner, $field);
-            $saved = $this->saveOwner($owner, $field, $entries, $ordered);
-            if (!$saved['ok']) {
-                return $saved;
-            }
-
-            return array_merge([
-                'ok' => true,
-                'saved' => true,
-                'blocks' => $this->readBlocks($saved['entry'], $field),
-            ], $this->previewPayload($this->rootEntry($saved['entry'])));
-        });
+        return $resolved['adapter']->reorderBlocks($owner, $resolved['field'], $orderedIds, $user);
     }
 
-    public function removeBlock(Entry $block, ?User $user): array
+    public function removeBlock(ElementInterface $block, ?User $user): array
     {
-        $owner = $block->getOwner();
-        if (!$owner instanceof Entry) {
-            return $this->fail('That block has no owner.');
-        }
-
-        $guard = $this->guardDraftMutation($owner, $user);
-        if (!$guard['ok']) {
-            return $guard;
-        }
-
-        $field = $block->getField();
-        if (!$field instanceof Matrix) {
+        $adapter = $this->adapters()->adapterForBlock($block);
+        if (!$adapter) {
             return $this->fail('That element is not a Content Designer block.');
         }
 
-        $ids = $this->blockIds($owner, $field);
-        $remaining = array_values(array_filter($ids, fn(int $id) => $id !== (int)$block->id));
-        if ($field->minEntries && count($remaining) < $field->minEntries) {
-            return $this->fail($field->handle . ' requires at least ' . $field->minEntries . ' entries.');
-        }
-
-        return $this->mutate(function() use ($owner, $field, $remaining) {
-            [$entries] = $this->payload($owner, $field);
-            foreach (array_keys($entries) as $key) {
-                if (!in_array((int)$key, $remaining, true)) {
-                    unset($entries[$key]);
-                }
-            }
-            $saved = $this->saveOwner($owner, $field, $entries, array_map('strval', $remaining));
-            if (!$saved['ok']) {
-                return $saved;
-            }
-
-            return array_merge([
-                'ok' => true,
-                'saved' => true,
-                'blocks' => $this->readBlocks($saved['entry'], $field),
-            ], $this->previewPayload($this->rootEntry($saved['entry'])));
-        });
+        return $adapter->removeBlock($block, $user);
     }
 
     public function updateEntry(Entry $draft, array $input, ?User $user): array
@@ -909,96 +742,23 @@ class ContentDesigner extends Component
         return $entry instanceof Entry && $user && Craft::$app->getElements()->canView($entry, $user) ? $entry : null;
     }
 
-    public function blockFromId(int $id, ?int $siteId): ?Entry
+    public function blockFromId(int $id, ?int $siteId): ?ElementInterface
     {
-        $block = Entry::find()->id($id)->status(null)->drafts(null)->siteId($siteId)->one();
-
-        return $block instanceof Entry ? $block : null;
+        return $this->adapters()->resolveBlock($id, $siteId);
     }
 
     /**
-     * Find a Matrix block by id under an entry (or nested block), using the same owner-scoped
+     * Find a structure block by id under an entry (or nested block), using the same owner-scoped
      * field queries as read_layout. Craft named drafts reuse canonical nested element ids and
      * only add elements_owners rows, so a bare id lookup + getOwner() walk misses the draft.
      */
-    public function findBlockOnEntry(Entry $root, int $blockId): ?Entry
+    public function findBlockOnEntry(Entry $root, int $blockId): ?ElementInterface
     {
         if ($blockId < 1) {
             return null;
         }
 
-        return $this->findBlockUnder($root, $blockId);
-    }
-
-    private function findBlockUnder(Entry $owner, int $blockId): ?Entry
-    {
-        foreach ($this->customFields($owner->getType()) as $custom) {
-            $field = $custom['field'];
-            if (!$field instanceof Matrix) {
-                continue;
-            }
-            foreach ($this->blocks($owner, $field) as $block) {
-                if ((int)$block->id === $blockId) {
-                    return $block;
-                }
-                $nested = $this->findBlockUnder($block, $blockId);
-                if ($nested instanceof Entry) {
-                    return $nested;
-                }
-            }
-        }
-
-        return null;
-    }
-
-    private function describeMatrix(Matrix $field): array
-    {
-        $types = [];
-        foreach ($field->getEntryTypes() as $entryType) {
-            $types[] = [
-                'handle' => $entryType->handle,
-                'name' => $entryType->name,
-                'fields' => $this->describeFields($entryType),
-            ];
-        }
-
-        return $types;
-    }
-
-    private function describeFields(EntryType $entryType): array
-    {
-        $layout = $entryType->getFieldLayout();
-        if (!$layout) {
-            return [];
-        }
-
-        $fields = [];
-        foreach ($layout->getTabs() as $tab) {
-            foreach ($tab->getElements() as $element) {
-                if (!$element instanceof CustomField) {
-                    continue;
-                }
-                $field = $element->getField();
-                if (!$field) {
-                    continue;
-                }
-                $row = [
-                    'handle' => $field->handle,
-                    'name' => $field->name,
-                    'required' => (bool)$element->required,
-                    'writable' => FieldSupport::isWritable($field) && !FieldSupport::isReadOnly($field) && !FieldSupport::isMatrix($field),
-                    'input' => FieldSupport::inputHint($field),
-                ];
-                if ($field instanceof Matrix) {
-                    $row['minEntries'] = $field->minEntries;
-                    $row['maxEntries'] = $field->maxEntries;
-                    $row['blockTypes'] = $this->describeMatrix($field);
-                }
-                $fields[] = $row;
-            }
-        }
-
-        return $fields;
+        return $this->adapters()->findBlockOnEntry($root, $blockId);
     }
 
     /**
@@ -1008,13 +768,11 @@ class ContentDesigner extends Component
     {
         $fields = [];
         $matrices = [];
-        foreach ($this->customFields($entry->getType()) as $custom) {
+        foreach ($this->helpers()->customFields($entry->getType()) as $custom) {
             $field = $custom['field'];
-            if ($field instanceof Matrix) {
-                $blocks = $this->readBlocks($entry, $field);
-                $matrices[$field->handle] = $this->matrixMeta($field, count($blocks)) + [
-                    'blocks' => $blocks,
-                ];
+            $adapter = $this->adapters()->forField($field);
+            if ($adapter) {
+                $matrices[$field->handle] = $adapter->readField($entry, $field);
                 continue;
             }
             if (!FieldSupport::isWritable($field) || FieldSupport::isReadOnly($field)) {
@@ -1328,26 +1086,64 @@ class ContentDesigner extends Component
         ];
     }
 
-    private function contentDesignerField(EntryType $entryType): ?Matrix
+    private function contentDesignerField(EntryType $entryType): ?CraftFieldInterface
     {
         $layout = $entryType->getFieldLayout();
         if (!$layout) {
             return null;
         }
         $field = $layout->getFieldByHandle(FieldSupport::CONTENT_DESIGNER);
+        if (!$field || !$this->adapters()->forField($field)) {
+            return null;
+        }
 
-        return $field instanceof Matrix ? $field : null;
+        return $field;
     }
 
-    private function matrixOn(Entry $owner, string $handle): ?Matrix
+    /**
+     * @return array{ok: true, field: CraftFieldInterface, adapter: StructureAdapterInterface}|array{ok: false, saved: false, error: string, errors?: array}
+     */
+    private function structureFieldOn(Entry $owner, string $handle): array
     {
         try {
             $field = $owner->getFieldLayout()?->getFieldByHandle($handle);
         } catch (InvalidFieldException) {
-            return null;
+            $field = null;
         }
 
-        return $field instanceof Matrix ? $field : null;
+        if (!$field) {
+            $handles = $this->structureHandles($owner);
+
+            return $this->fail(
+                'That structure field is not on the owner. Structure fields on this layout: '
+                . ($handles === [] ? 'none' : implode(', ', $handles))
+                . '.',
+            );
+        }
+
+        $adapter = $this->adapters()->forField($field);
+        if (!$adapter) {
+            return $this->fail(
+                'That field type is not supported for block editing (' . $field::class . ').',
+            );
+        }
+
+        return ['ok' => true, 'field' => $field, 'adapter' => $adapter];
+    }
+
+    /**
+     * @return string[]
+     */
+    private function structureHandles(Entry $owner): array
+    {
+        $handles = [];
+        foreach ($this->helpers()->customFields($owner->getType()) as $custom) {
+            if ($this->adapters()->forField($custom['field'])) {
+                $handles[] = $custom['field']->handle;
+            }
+        }
+
+        return $handles;
     }
 
     private function typeOnField(Matrix $field, string $handle): ?EntryType
@@ -1606,7 +1402,7 @@ class ContentDesigner extends Component
     private function applyUpdateOperation(Entry $draft, array $operation, ?User $user): array
     {
         $block = $this->findBlockOnEntry($draft, (int)($operation['blockId'] ?? 0));
-        if (!$block instanceof Entry) {
+        if (!$block) {
             return $this->fail('That block is not on this draft.');
         }
 
@@ -1624,7 +1420,7 @@ class ContentDesigner extends Component
     private function applyRemoveOperation(Entry $draft, array $operation, ?User $user): array
     {
         $block = $this->findBlockOnEntry($draft, (int)($operation['blockId'] ?? 0));
-        if (!$block instanceof Entry) {
+        if (!$block) {
             return $this->fail('That block is not on this draft.');
         }
 

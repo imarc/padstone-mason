@@ -27,6 +27,18 @@ class FieldSupport
         return $field instanceof Matrix;
     }
 
+    /**
+     * Matrix or Neo (and similar) containers edited via structure tools, not as scalar values.
+     */
+    public static function isStructureContainer(FieldInterface $field): bool
+    {
+        if (self::isMatrix($field)) {
+            return true;
+        }
+
+        return strtolower($field::class) === 'benf\\neo\\field';
+    }
+
     public static function isReadOnly(FieldInterface $field): bool
     {
         $class = strtolower($field::class);
@@ -56,8 +68,16 @@ class FieldSupport
 
     public static function inputHint(FieldInterface $field): string
     {
-        if ($field instanceof Matrix) {
-            return 'Use summarize_page for orientation, apply_blocks for multi-block recipes, or add_block / update_block / reorder_blocks / remove_block for single edits. min=' . ($field->minEntries ?? 'none') . ' max=' . ($field->maxEntries ?? 'none');
+        if (self::isStructureContainer($field)) {
+            if ($field instanceof Matrix) {
+                $min = $field->minEntries ?? 'none';
+                $max = $field->maxEntries ?? 'none';
+            } else {
+                $min = property_exists($field, 'minTopBlocks') ? ($field->minTopBlocks ?? $field->minBlocks ?? 'none') : 'none';
+                $max = property_exists($field, 'maxTopBlocks') ? ($field->maxTopBlocks ?? $field->maxBlocks ?? 'none') : 'none';
+            }
+
+            return 'Use summarize_page for orientation, apply_blocks for multi-block recipes, or add_block / update_block / reorder_blocks / remove_block for single edits. min=' . $min . ' max=' . $max;
         }
         if (self::isReadOnly($field)) {
             return 'Read-only. Writes are skipped.';
@@ -93,10 +113,10 @@ class FieldSupport
      */
     public static function prepare(FieldInterface $field, mixed $value, ?User $user): array
     {
-        if (self::isMatrix($field)) {
+        if (self::isStructureContainer($field)) {
             return [
                 'status' => 'fail',
-                'message' => $field->handle . ' is a nested Matrix field. Use the block tools instead of setting it as a value.',
+                'message' => $field->handle . ' is a structure field. Use the block tools instead of setting it as a value.',
             ];
         }
 
