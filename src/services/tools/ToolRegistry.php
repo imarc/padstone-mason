@@ -90,8 +90,10 @@ class ToolRegistry
     {
         return [
             new DescribeSchema($drafts),
+            new SummarizePage($drafts),
             new ReadLayout($drafts),
             new CreatePage($drafts),
+            new ApplyBlocks($drafts),
             new AddBlock($drafts),
             new UpdateBlock($drafts),
             new ReorderBlocks($drafts),

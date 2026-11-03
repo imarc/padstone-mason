@@ -6,12 +6,14 @@ use Craft;
 use craft\base\Component;
 use craft\base\Element;
 use craft\base\FieldInterface;
+use craft\ckeditor\Field as CkeditorField;
 use craft\elements\Asset;
 use craft\elements\Entry;
 use craft\elements\User;
 use craft\errors\InvalidFieldException;
 use craft\fieldlayoutelements\CustomField;
 use craft\fields\Matrix;
+use craft\fields\PlainText;
 use craft\helpers\ElementHelper;
 use craft\helpers\UrlHelper;
 use craft\models\EntryType;
@@ -63,6 +65,129 @@ class ContentDesigner extends Component
             'matrices' => $matrices,
             'blocks' => $matrices[FieldSupport::CONTENT_DESIGNER]['blocks'] ?? [],
         ];
+    }
+
+    public function summarizePage(Entry $entry, ?User $user): array
+    {
+        if (!$user || !Craft::$app->getElements()->canView($entry, $user)) {
+            return $this->fail('You do not have permission to view that entry.');
+        }
+
+        $matrices = [];
+        foreach ($this->customFields($entry->getType()) as $custom) {
+            $field = $custom['field'];
+            if (!$field instanceof Matrix) {
+                continue;
+            }
+            $blocks = $this->blocks($entry, $field);
+            $count = count($blocks);
+            $meta = $this->matrixMeta($field, $count);
+            $items = [];
+            foreach ($blocks as $block) {
+                $items[] = [
+                    'id' => (int)$block->id,
+                    'type' => $block->getType()->handle,
+                    'signal' => $this->blockSignal($block),
+                ];
+            }
+            $matrices[$field->handle] = $meta + ['blocks' => $items];
+        }
+
+        return [
+            'ok' => true,
+            'entryId' => $entry->getCanonicalId(),
+            'draftId' => $entry->draftId,
+            'title' => (string)$entry->title,
+            'slug' => (string)$entry->slug,
+            'matrices' => $matrices,
+        ];
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $operations
+     * @return array<string, mixed>
+     */
+    public function applyBlocks(Entry $draft, array $operations, ?User $user): array
+    {
+        $guard = $this->guardDraftMutation($draft, $user);
+        if (!$guard['ok']) {
+            return $guard;
+        }
+
+        if ($operations === []) {
+            return $this->fail('At least one operation is required.');
+        }
+
+        $steps = [];
+        $anySaved = false;
+        $preview = [
+            'previewUrl' => null,
+            'previewAvailable' => false,
+            'editUrl' => null,
+        ];
+
+        foreach (array_values($operations) as $index => $operation) {
+            if (!is_array($operation)) {
+                return [
+                    'ok' => false,
+                    'saved' => $anySaved,
+                    'stoppedAt' => $index,
+                    'error' => 'Each operation must be an object.',
+                    'steps' => $steps,
+                ] + $preview;
+            }
+
+            $result = $this->applyBlockOperation($draft, $operation, $user);
+            $step = [
+                'index' => $index,
+                'op' => (string)($operation['op'] ?? ''),
+                'ok' => !empty($result['ok']),
+                'saved' => !empty($result['saved']),
+                'error' => $result['error'] ?? null,
+            ];
+            if (isset($result['blockId'])) {
+                $step['blockId'] = $result['blockId'];
+            }
+            $steps[] = $step;
+
+            if (!empty($result['previewUrl']) || array_key_exists('previewAvailable', $result)) {
+                $preview = [
+                    'previewUrl' => $result['previewUrl'] ?? null,
+                    'previewAvailable' => (bool)($result['previewAvailable'] ?? false),
+                    'editUrl' => $result['editUrl'] ?? null,
+                ];
+            }
+
+            if (empty($result['ok'])) {
+                return [
+                    'ok' => false,
+                    'saved' => $anySaved,
+                    'stoppedAt' => $index,
+                    'error' => $result['error'] ?? 'The change was not saved.',
+                    'steps' => $steps,
+                ] + $preview;
+            }
+
+            if (!empty($result['saved'])) {
+                $anySaved = true;
+            }
+
+            $fresh = $this->entryFromId(
+                (int)$draft->getCanonicalId(),
+                $draft->draftId ? (int)$draft->draftId : null,
+                (int)$draft->siteId,
+                $user,
+            );
+            if ($fresh instanceof Entry) {
+                $draft = $fresh;
+            }
+        }
+
+        return [
+            'ok' => true,
+            'saved' => $anySaved,
+            'steps' => $steps,
+        ] + $preview;
     }
 
     public function createPage(array $input, ?User $user): array
@@ -796,10 +921,9 @@ class ContentDesigner extends Component
         foreach ($this->customFields($entry->getType()) as $custom) {
             $field = $custom['field'];
             if ($field instanceof Matrix) {
-                $matrices[$field->handle] = [
-                    'minEntries' => $field->minEntries,
-                    'maxEntries' => $field->maxEntries,
-                    'blocks' => $this->readBlocks($entry, $field),
+                $blocks = $this->readBlocks($entry, $field);
+                $matrices[$field->handle] = $this->matrixMeta($field, count($blocks)) + [
+                    'blocks' => $blocks,
                 ];
                 continue;
             }
@@ -1343,6 +1467,159 @@ class ContentDesigner extends Component
         }
 
         return $messages ? implode('; ', $messages) : 'Validation failed.';
+    }
+
+    /**
+     * @param array<string, mixed> $operation
+     * @return array<string, mixed>
+     */
+    private function applyBlockOperation(Entry $draft, array $operation, ?User $user): array
+    {
+        return match ((string)($operation['op'] ?? '')) {
+            'add' => $this->applyAddOperation($draft, $operation, $user),
+            'update' => $this->applyUpdateOperation($draft, $operation, $user),
+            'remove' => $this->applyRemoveOperation($draft, $operation, $user),
+            'reorder' => $this->applyReorderOperation($draft, $operation, $user),
+            default => $this->fail('Unknown operation. Use add, update, remove, or reorder.'),
+        };
+    }
+
+    /**
+     * @param array<string, mixed> $operation
+     * @return array<string, mixed>
+     */
+    private function applyAddOperation(Entry $draft, array $operation, ?User $user): array
+    {
+        $owner = $draft;
+        if (!empty($operation['parentId'])) {
+            $owner = $this->findBlockOnEntry($draft, (int)$operation['parentId']);
+            if (!$owner instanceof Entry) {
+                return $this->fail('That parent block is not on this draft.');
+            }
+        }
+
+        return $this->addBlock(
+            $owner,
+            (string)($operation['fieldHandle'] ?? FieldSupport::CONTENT_DESIGNER),
+            (string)($operation['type'] ?? ''),
+            isset($operation['position']) ? (int)$operation['position'] : null,
+            is_array($operation['values'] ?? null) ? $operation['values'] : [],
+            is_array($operation['nested'] ?? null) ? $operation['nested'] : [],
+            $user,
+        );
+    }
+
+    /**
+     * @param array<string, mixed> $operation
+     * @return array<string, mixed>
+     */
+    private function applyUpdateOperation(Entry $draft, array $operation, ?User $user): array
+    {
+        $block = $this->findBlockOnEntry($draft, (int)($operation['blockId'] ?? 0));
+        if (!$block instanceof Entry) {
+            return $this->fail('That block is not on this draft.');
+        }
+
+        return $this->updateBlock(
+            $block,
+            is_array($operation['values'] ?? null) ? $operation['values'] : [],
+            $user,
+        );
+    }
+
+    /**
+     * @param array<string, mixed> $operation
+     * @return array<string, mixed>
+     */
+    private function applyRemoveOperation(Entry $draft, array $operation, ?User $user): array
+    {
+        $block = $this->findBlockOnEntry($draft, (int)($operation['blockId'] ?? 0));
+        if (!$block instanceof Entry) {
+            return $this->fail('That block is not on this draft.');
+        }
+
+        return $this->removeBlock($block, $user);
+    }
+
+    /**
+     * @param array<string, mixed> $operation
+     * @return array<string, mixed>
+     */
+    private function applyReorderOperation(Entry $draft, array $operation, ?User $user): array
+    {
+        $owner = $draft;
+        if (!empty($operation['parentId'])) {
+            $owner = $this->findBlockOnEntry($draft, (int)$operation['parentId']);
+            if (!$owner instanceof Entry) {
+                return $this->fail('That parent block is not on this draft.');
+            }
+        }
+
+        return $this->reorderBlocks(
+            $owner,
+            (string)($operation['fieldHandle'] ?? FieldSupport::CONTENT_DESIGNER),
+            is_array($operation['orderedIds'] ?? null) ? $operation['orderedIds'] : [],
+            $user,
+        );
+    }
+
+    /**
+     * @return array{minEntries: ?int, maxEntries: ?int, count: int, atMin: bool, atMax: bool, hint?: string}
+     */
+    private function matrixMeta(Matrix $field, int $count): array
+    {
+        $min = $field->minEntries;
+        $max = $field->maxEntries;
+        $atMin = $min !== null && $count <= (int)$min;
+        $atMax = $max !== null && $count >= (int)$max;
+        $meta = [
+            'minEntries' => $min,
+            'maxEntries' => $max,
+            'count' => $count,
+            'atMin' => $atMin,
+            'atMax' => $atMax,
+        ];
+        if ($atMax) {
+            $meta['hint'] = 'Field is at maximum. Update an existing block id; do not add another.';
+        }
+
+        return $meta;
+    }
+
+    private function blockSignal(Entry $block): string
+    {
+        foreach ($this->customFields($block->getType()) as $custom) {
+            $field = $custom['field'];
+            if (
+                !($field instanceof PlainText || $field instanceof CkeditorField || FieldSupport::isRegex($field))
+                || FieldSupport::isReadOnly($field)
+            ) {
+                continue;
+            }
+
+            try {
+                $value = FieldSupport::readValue($field, $block->getFieldValue($field->handle));
+            } catch (Throwable) {
+                continue;
+            }
+
+            if (!is_string($value)) {
+                continue;
+            }
+
+            $plain = trim(preg_replace('/\s+/u', ' ', strip_tags($value)) ?? '');
+            if ($plain === '') {
+                continue;
+            }
+
+            if (mb_strlen($plain) > 80) {
+                return mb_substr($plain, 0, 77) . '...';
+            }
+
+            return $plain;
+        }
+
+        return '';
     }
 
     private function fail(string $error, array $errors = []): array

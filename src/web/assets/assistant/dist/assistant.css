@@ -241,6 +241,13 @@ a.padstone-mason__bound-title:hover {
   margin-top: 8px;
 }
 
+.padstone-mason__message-tools {
+  margin-top: 8px;
+  color: #8f98a3;
+  font-size: 11px;
+  line-height: 1.3;
+}
+
 .padstone-mason__thumb {
   margin: 0;
   max-width: 96px;

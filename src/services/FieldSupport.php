@@ -55,7 +55,7 @@ class FieldSupport
     public static function inputHint(FieldInterface $field): string
     {
         if ($field instanceof Matrix) {
-            return 'Use add_block, update_block, reorder_blocks, or remove_block. min=' . ($field->minEntries ?? 'none') . ' max=' . ($field->maxEntries ?? 'none');
+            return 'Use summarize_page for orientation, apply_blocks for multi-block recipes, or add_block / update_block / reorder_blocks / remove_block for single edits. min=' . ($field->minEntries ?? 'none') . ' max=' . ($field->maxEntries ?? 'none');
         }
         if (self::isReadOnly($field)) {
             return 'Read-only. Writes are skipped.';

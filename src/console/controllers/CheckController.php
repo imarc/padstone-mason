@@ -67,6 +67,7 @@ class CheckController extends Controller
             $this->checkPermissions($plugin, $admin);
             $this->checkProviders($plugin);
             $this->checkEditing($plugin, $admin);
+            $this->checkSummarizeAndApply($plugin, $admin);
             $this->checkConversationAssets($plugin, $admin);
             $this->checkUnpublishAndDelete($plugin, $admin);
             $this->checkAssistantLoop($plugin, $admin);
@@ -428,13 +429,15 @@ class CheckController extends Controller
         );
         if (
             !is_string($prompt)
-            ||             !str_contains($prompt, 'ask the admin which to use')
+            || !str_contains($prompt, 'ask the admin which to use')
             || !str_contains($prompt, 'Do not say the request is impossible or a project config change')
             || !str_contains($prompt, 'basicPage (Basic Page)')
             || str_contains($prompt, 'There is no entry type named page')
             || !str_contains($prompt, 'rebind_entry')
+            || !str_contains($prompt, 'Prefer summarize_page')
+            || !str_contains($prompt, 'Prefer apply_blocks')
         ) {
-            $this->failures[] = 'The instructions do not list the allowed entry types or still alias page to basicPage.';
+            $this->failures[] = 'The instructions do not list the allowed entry types, summarize/apply preferences, or still alias page to basicPage.';
         }
 
         $created = $plugin->contentDesigner->createPage([
@@ -494,8 +497,10 @@ class CheckController extends Controller
             || empty($breadcrumb['ok'])
             || ($afterHero['fields']['breadcrumbTitle'] ?? null) !== 'About'
             || ($afterHero['fields']['showBreadcrumbs'] ?? null) !== false
+            || empty($heroLayout['matrices']['hero']['atMax'])
+            || !str_contains((string)($heroLayout['matrices']['hero']['hint'] ?? ''), 'maximum')
         ) {
-            $this->failures[] = 'The hero layout field could not be edited: ' . ($hero['error'] ?? '') . ' ' . json_encode($heroBlocks) . ' ' . json_encode($afterHero['fields'] ?? []);
+            $this->failures[] = 'The hero layout field could not be edited: ' . ($hero['error'] ?? '') . ' ' . json_encode($heroBlocks) . ' ' . json_encode($afterHero['fields'] ?? []) . ' ' . json_encode($heroLayout['matrices']['hero'] ?? []);
         }
 
         $added = $plugin->contentDesigner->addBlock($draft, 'contentDesigner', 'richText', 0, [
@@ -895,9 +900,29 @@ class CheckController extends Controller
         if ($headlines !== ['B', 'A']) {
             $this->failures[] = 'The tool loop did not add and reorder two blocks: ' . json_encode($headlines) . ' ' . ($reply['reply'] ?? '');
         }
+        if (($reply['tools'] ?? null) !== ['add_block', 'add_block', 'reorder_blocks']) {
+            $this->failures[] = 'The reply did not list the tools used: ' . json_encode($reply['tools'] ?? null);
+        }
+        $visibleMessages = $plugin->conversations->messagesForUser($conversation);
+        $lastAssistant = null;
+        foreach (array_reverse($visibleMessages) as $message) {
+            if ($message->role === 'assistant') {
+                $lastAssistant = $message;
+                break;
+            }
+        }
+        $viewTools = $plugin->conversations->ownedView((int)$conversation->id, $admin)['messages'] ?? [];
+        $lastView = $viewTools === [] ? null : $viewTools[array_key_last($viewTools)];
+        if (
+            !$lastAssistant
+            || $plugin->conversations->toolsForMessage($lastAssistant) !== ['add_block', 'add_block', 'reorder_blocks']
+            || ($lastView['tools'] ?? null) !== ['add_block', 'add_block', 'reorder_blocks']
+        ) {
+            $this->failures[] = 'The assistant message did not persist tools for the footer: ' . json_encode($lastView['tools'] ?? null);
+        }
         $visible = array_map(
             fn(MessageRecord $message) => trim((string)$message->content),
-            $plugin->conversations->messagesForUser($conversation),
+            $visibleMessages,
         );
         $modelToolTurns = array_filter(
             $plugin->conversations->messagesForModel($conversation),
@@ -1393,6 +1418,16 @@ class CheckController extends Controller
         if (!str_contains($rendered, '<strong>Bold</strong>') || !str_contains($rendered, '<li>one</li>') || !str_contains($send, 'replyHtml') || !str_contains($js, 'data.messages')) {
             $this->failures[] = 'Live replies are not rendered as Markdown.';
         }
+        $css = (string)file_get_contents(Plugin::getInstance()->getBasePath() . '/web/assets/assistant/dist/assistant.css');
+        $panel = (string)file_get_contents(Plugin::getInstance()->getBasePath() . '/templates/_panel.twig');
+        if (
+            !str_contains($js, 'padstone-mason__message-tools')
+            || !str_contains($css, 'padstone-mason__message-tools')
+            || !str_contains($panel, 'padstone-mason__message-tools')
+            || !str_contains($js, 'message.tools.join')
+        ) {
+            $this->failures[] = 'Assistant replies do not show a tools footer.';
+        }
         $panelSource = $this->methodSource(new ReflectionMethod(ChatController::class, 'actionPanel'));
         $selectedSource = $this->methodSource(new ReflectionMethod(ChatController::class, 'selectedConversation'));
         if (
@@ -1555,6 +1590,180 @@ class CheckController extends Controller
         $view = $plugin->conversations->ownedView((int)$chat->id, $admin);
         if (!$view || empty($view['assets']) || empty($view['messages'])) {
             $this->failures[] = 'ownedView did not include conversation assets.';
+        }
+    }
+
+    private function checkSummarizeAndApply(Plugin $plugin, User $admin): void
+    {
+        Craft::$app->getUser()->setIdentity($admin);
+
+        $tools = $plugin->assistant->tools();
+        $names = array_column($tools, 'name');
+        $byName = [];
+        foreach ($tools as $tool) {
+            $byName[$tool['name']] = $tool;
+        }
+        if (
+            !in_array('summarize_page', $names, true)
+            || !in_array('apply_blocks', $names, true)
+            || !str_contains((string)($byName['summarize_page']['description'] ?? ''), 'orientation')
+            || !str_contains((string)($byName['apply_blocks']['description'] ?? ''), 'Stops on the first failure')
+            || !str_contains((string)($byName['read_layout']['description'] ?? ''), 'summarize_page')
+            || !str_contains((string)($byName['add_block']['description'] ?? ''), 'apply_blocks')
+            || !str_contains((string)($byName['update_block']['description'] ?? ''), 'apply_blocks')
+        ) {
+            $this->failures[] = 'summarize_page / apply_blocks tools or descriptions are missing.';
+        }
+
+        $created = $plugin->contentDesigner->createPage([
+            'title' => 'Assistant check summarize',
+            'section' => 'pages',
+            'entryType' => 'basicPage',
+            'slug' => 'assistant-check-summarize-' . uniqid(),
+        ], $admin);
+        if (empty($created['ok'])) {
+            $this->failures[] = 'Could not create a page for summarize/apply checks: ' . ($created['error'] ?? '');
+
+            return;
+        }
+        $this->elementIds[] = (int)$created['entryId'];
+
+        $draft = $plugin->contentDesigner->entryFromId((int)$created['entryId'], (int)$created['draftId'], null, $admin);
+        if (!$draft instanceof Entry) {
+            $this->failures[] = 'Could not load the summarize/apply draft.';
+
+            return;
+        }
+
+        $hero = $plugin->contentDesigner->addBlock($draft, 'hero', 'standardHero', null, [
+            'heroEyebrow' => 'Sum',
+            'heroHeadline' => 'Summarize hero',
+            'heroContent' => '<p>Hero body</p>',
+            'ctaLink' => 'https://example.com/summarize',
+        ], [], $admin);
+        $draft = $plugin->contentDesigner->entryFromId((int)$created['entryId'], (int)$created['draftId'], null, $admin);
+        $seed = $draft ? $plugin->contentDesigner->addBlock($draft, 'contentDesigner', 'richText', null, [
+            'headline' => 'Seed block',
+            'blockContent' => '<p>Seed content</p>',
+        ], [], $admin) : ['ok' => false];
+        $draft = $plugin->contentDesigner->entryFromId((int)$created['entryId'], (int)$created['draftId'], null, $admin);
+        if (empty($hero['ok']) || empty($seed['ok']) || !$draft instanceof Entry) {
+            $this->failures[] = 'Could not seed summarize/apply draft: ' . ($hero['error'] ?? '') . ' ' . ($seed['error'] ?? '');
+
+            return;
+        }
+
+        $summary = $plugin->contentDesigner->summarizePage($draft, $admin);
+        $heroSummary = $summary['matrices']['hero'] ?? [];
+        $contentSummary = $summary['matrices']['contentDesigner'] ?? [];
+        $seedSignal = (string)($contentSummary['blocks'][0]['signal'] ?? '');
+        if (
+            empty($summary['ok'])
+            || ($summary['title'] ?? null) !== 'Assistant check summarize'
+            || empty($heroSummary['atMax'])
+            || ($heroSummary['blocks'][0]['type'] ?? null) !== 'standardHero'
+            || !str_contains((string)($heroSummary['blocks'][0]['signal'] ?? ''), 'Sum')
+            || ($contentSummary['blocks'][0]['type'] ?? null) !== 'richText'
+            || $seedSignal === ''
+            || !str_contains($seedSignal, 'Seed')
+        ) {
+            $this->failures[] = 'summarizePage shape was wrong: ' . json_encode($summary);
+        }
+
+        $chat = $plugin->conversations->open(
+            $admin->id,
+            (int)$created['entryId'],
+            (int)$created['draftId'],
+            Craft::$app->getSites()->getPrimarySite()->id,
+        );
+        $this->conversationIds[] = (int)$chat->id;
+
+        $toolSummary = $plugin->assistant->execute('summarize_page', [], $chat, $admin);
+        if (empty($toolSummary['ok']) || empty($toolSummary['matrices']['hero']['atMax'])) {
+            $this->failures[] = 'summarize_page tool failed: ' . json_encode($toolSummary);
+        }
+
+        $batch = $plugin->assistant->execute('apply_blocks', [
+            'operations' => [
+                [
+                    'op' => 'add',
+                    'fieldHandle' => 'contentDesigner',
+                    'type' => 'richText',
+                    'values' => ['headline' => 'Batch A', 'blockContent' => '<p>A</p>'],
+                ],
+                [
+                    'op' => 'add',
+                    'fieldHandle' => 'contentDesigner',
+                    'type' => 'richText',
+                    'values' => ['headline' => 'Batch B', 'blockContent' => '<p>B</p>'],
+                ],
+            ],
+        ], $chat, $admin);
+        $draft = $plugin->contentDesigner->entryFromId((int)$created['entryId'], (int)$created['draftId'], null, $admin);
+        $afterBatch = $draft ? $plugin->contentDesigner->summarizePage($draft, $admin) : [];
+        $contentSignals = array_column($afterBatch['matrices']['contentDesigner']['blocks'] ?? [], 'signal');
+        if (
+            empty($batch['ok'])
+            || empty($batch['saved'])
+            || count($batch['steps'] ?? []) !== 2
+            || !array_key_exists('previewUrl', $batch)
+            || !array_key_exists('previewAvailable', $batch)
+            || !array_key_exists('editUrl', $batch)
+            || !in_array('Batch A', $contentSignals, true)
+            || !in_array('Batch B', $contentSignals, true)
+        ) {
+            $this->failures[] = 'Successful apply_blocks failed: ' . json_encode($batch) . ' ' . json_encode($afterBatch);
+        }
+
+        $beforePartial = count($afterBatch['matrices']['contentDesigner']['blocks'] ?? []);
+        $partial = $plugin->assistant->execute('apply_blocks', [
+            'operations' => [
+                [
+                    'op' => 'add',
+                    'fieldHandle' => 'contentDesigner',
+                    'type' => 'richText',
+                    'values' => ['headline' => 'Partial keep', 'blockContent' => '<p>Keep</p>'],
+                ],
+                [
+                    'op' => 'add',
+                    'fieldHandle' => 'contentDesigner',
+                    'type' => 'notARealBlock',
+                    'values' => ['headline' => 'Should fail'],
+                ],
+            ],
+        ], $chat, $admin);
+        $draft = $plugin->contentDesigner->entryFromId((int)$created['entryId'], (int)$created['draftId'], null, $admin);
+        $afterPartial = $draft ? $plugin->contentDesigner->summarizePage($draft, $admin) : [];
+        $partialSignals = array_column($afterPartial['matrices']['contentDesigner']['blocks'] ?? [], 'signal');
+        if (
+            !empty($partial['ok'])
+            || empty($partial['saved'])
+            || ($partial['stoppedAt'] ?? null) !== 1
+            || count($afterPartial['matrices']['contentDesigner']['blocks'] ?? []) !== $beforePartial + 1
+            || !in_array('Partial keep', $partialSignals, true)
+        ) {
+            $this->failures[] = 'Partial apply_blocks behavior was wrong: ' . json_encode($partial) . ' ' . json_encode($afterPartial);
+        }
+
+        $heroId = (int)($afterPartial['matrices']['hero']['blocks'][0]['id'] ?? 0);
+        $updateMax = $plugin->assistant->execute('apply_blocks', [
+            'operations' => [
+                [
+                    'op' => 'update',
+                    'blockId' => $heroId,
+                    'values' => ['heroHeadline' => 'Updated via batch'],
+                ],
+            ],
+        ], $chat, $admin);
+        $draft = $plugin->contentDesigner->entryFromId((int)$created['entryId'], (int)$created['draftId'], null, $admin);
+        $afterUpdate = $draft ? $plugin->contentDesigner->readLayout($draft, $admin) : [];
+        if (
+            empty($updateMax['ok'])
+            || empty($updateMax['saved'])
+            || ($afterUpdate['matrices']['hero']['blocks'][0]['fields']['heroHeadline'] ?? null) !== 'Updated via batch'
+            || empty($afterUpdate['matrices']['hero']['atMax'])
+        ) {
+            $this->failures[] = 'apply_blocks update-at-max failed: ' . json_encode($updateMax) . ' ' . json_encode($afterUpdate['matrices']['hero'] ?? []);
         }
     }
 

@@ -226,6 +226,7 @@ class Conversations extends Component
                 'content' => $content,
                 'html' => Markdown::process($content, 'gfm'),
                 'assets' => $this->assetsForMessage($message),
+                'tools' => $this->toolsForMessage($message),
             ];
         }
 
@@ -320,6 +321,26 @@ class Conversations extends Component
         return Plugin::getInstance()->conversationAssets->summariesForIds(
             array_map('intval', $metadata['assetIds']),
         );
+    }
+
+    /**
+     * @return string[]
+     */
+    public function toolsForMessage(MessageRecord $message): array
+    {
+        $metadata = $message->metadata ? Json::decode($message->metadata) : null;
+        if (!is_array($metadata) || empty($metadata['tools']) || !is_array($metadata['tools'])) {
+            return [];
+        }
+
+        $tools = [];
+        foreach ($metadata['tools'] as $tool) {
+            if (is_string($tool) && $tool !== '') {
+                $tools[] = $tool;
+            }
+        }
+
+        return $tools;
     }
 
     public function contentForModel(MessageRecord $message): string

@@ -16,7 +16,7 @@ class ReadLayout extends BaseTool
 
     public function description(): string
     {
-        return 'Read the draft title, writable layout fields, and the blocks in each Matrix field. matrices includes hero and contentDesigner.';
+        return 'Read the draft title, writable layout fields, and full block field values in each Matrix field. matrices includes hero and contentDesigner, with atMin/atMax and a max hint. Prefer summarize_page for orientation; use this when you need full values.';
     }
 
     public function parameters(): array

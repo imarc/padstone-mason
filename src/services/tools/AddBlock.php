@@ -17,7 +17,7 @@ class AddBlock extends BaseTool
 
     public function description(): string
     {
-        return 'Add a block type from the schema. fieldHandle defaults to contentDesigner. For another Matrix field on the entry, such as hero, pass that handle and one of its block types. Refused when the field is already at its maximum. For nested Matrix fields with a minimum, pass nested blocks in the same call.';
+        return 'Add one block type from the schema. fieldHandle defaults to contentDesigner. For another Matrix field on the entry, such as hero, pass that handle and one of its block types. Refused when the field is already at its maximum—update the existing block instead. For nested Matrix fields with a minimum, pass nested blocks in the same call. For several block changes in one request, prefer apply_blocks.';
     }
 
     public function parameters(): array

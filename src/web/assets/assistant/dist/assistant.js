@@ -271,6 +271,12 @@
     if (message.assets && message.assets.length) {
       article.appendChild(assetFigures(message.assets));
     }
+    if (message.role === 'assistant' && message.tools && message.tools.length) {
+      const footer = document.createElement('footer');
+      footer.className = 'padstone-mason__message-tools';
+      footer.textContent = 'Tools used: ' + message.tools.join(', ');
+      article.appendChild(footer);
+    }
   }
 
   function replaceTranscript(root, messages) {
@@ -480,15 +486,17 @@
     transcript.scrollTop = transcript.scrollHeight;
   }
 
-  function appendMessage(root, role, text, html, assets) {
+  function appendMessage(root, role, text, html, assets, tools) {
     const transcript = root.querySelector('[data-assistant-transcript]');
     const article = document.createElement('article');
     article.className = 'padstone-mason__message padstone-mason__message--' + role;
     article.dataset.role = role;
     fillMessage(article, {
+      role: role,
       content: text,
       html: html,
-      assets: assets || []
+      assets: assets || [],
+      tools: tools || []
     });
     transcript.appendChild(article);
     transcript.scrollTop = transcript.scrollHeight;
@@ -499,7 +507,7 @@
       replaceTranscript(root, data.messages);
       return;
     }
-    appendMessage(root, 'assistant', data.reply || 'The change was not saved.', data.replyHtml);
+    appendMessage(root, 'assistant', data.reply || 'The change was not saved.', data.replyHtml, [], data.tools || []);
   }
 
   function syncPreviewButton(root) {

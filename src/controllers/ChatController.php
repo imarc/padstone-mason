@@ -452,6 +452,7 @@ class ChatController extends Controller
                 'role' => $message->role,
                 'content' => (string)$message->content,
                 'assets' => Plugin::getInstance()->conversations->assetsForMessage($message),
+                'tools' => Plugin::getInstance()->conversations->toolsForMessage($message),
             ];
         }
 

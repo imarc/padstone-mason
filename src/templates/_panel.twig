@@ -58,6 +58,9 @@
                                 {% endfor %}
                             </div>
                         {% endif %}
+                        {% if message.role == 'assistant' and message.tools is defined and message.tools %}
+                            <footer class="padstone-mason__message-tools">Tools used: {{ message.tools|join(', ') }}</footer>
+                        {% endif %}
                     </article>
                 {% endfor %}
             </div>

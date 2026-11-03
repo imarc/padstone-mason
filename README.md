@@ -44,6 +44,8 @@ Each person only sees their own chats. The assistant does not read unsaved chang
 
 The fields on the entry's layout. Matrix fields, including Content Designer and the hero when those fields exist, can take their existing block types, including nested fields such as columns and cards. Other writable layout fields, such as the breadcrumb title, can be updated on the entry. Writable fields are plain text, CKEditor, lightswitch, dropdown, link, regex, and existing assets or entries by id (including conversation uploads).
 
+Orientation and multi-block recipes use `summarize_page` (compact Matrix outline with min/max and short text signals) and `apply_blocks` (ordered add/update/remove/reorder ops in one call). `apply_blocks` stops on the first failure; earlier successful steps stay saved and the result reports each step. Single edits still use the atomic block tools.
+
 A shared section is a relation to an existing shared block. Inner blocks are not copied.
 
 ## What it will not do

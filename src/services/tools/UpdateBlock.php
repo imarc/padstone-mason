@@ -16,7 +16,7 @@ class UpdateBlock extends BaseTool
 
     public function description(): string
     {
-        return 'Update writable fields on one block. Omit fields that should stay the same. Pass existing asset ids for Assets fields. Do not send raw file data.';
+        return 'Update writable fields on one block. Omit fields that should stay the same. Pass existing asset ids for Assets fields. Do not send raw file data. Use this when a Matrix field is at its maximum and the content should change in place. For several block changes in one request, prefer apply_blocks.';
     }
 
     public function parameters(): array
