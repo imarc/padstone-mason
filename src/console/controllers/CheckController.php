@@ -3,9 +3,20 @@
 namespace imarc\padstonemason\console\controllers;
 
 use Craft;
+use craft\base\FieldInterface;
 use craft\elements\Asset;
+use craft\elements\Category;
+use craft\elements\ElementCollection;
 use craft\elements\Entry;
+use craft\elements\Tag;
 use craft\elements\User;
+use craft\fields\Categories;
+use craft\fields\Entries as EntriesField;
+use craft\fields\Matrix;
+use craft\fields\PlainText;
+use craft\fields\Table;
+use craft\fields\Tags;
+use craft\fields\Users as UsersField;
 use craft\enums\CmsEdition;
 use GuzzleHttp\Client;
 use GuzzleHttp\Handler\MockHandler;
@@ -20,6 +31,7 @@ use imarc\padstonemason\models\Settings;
 use imarc\padstonemason\Plugin;
 use imarc\padstonemason\services\ContentDesigner;
 use imarc\padstonemason\services\FieldSupport;
+use imarc\padstonemason\services\structure\StructureHelpers;
 use imarc\padstonemason\records\ConversationAssetRecord;
 use imarc\padstonemason\records\ConversationRecord;
 use imarc\padstonemason\records\MessageRecord;
@@ -78,6 +90,7 @@ class CheckController extends Controller
             $this->checkSummarizeAndApply($plugin, $admin);
             $this->checkConversationAssets($plugin, $admin);
             $this->checkMediaAndRelations($plugin, $admin);
+            $this->checkReadableRelations($plugin, $admin);
             $this->checkUnpublishAndDelete($plugin, $admin);
             $this->checkAssistantLoop($plugin, $admin);
             $this->checkConversations($plugin, $admin);
@@ -2206,6 +2219,290 @@ class CheckController extends Controller
             'siteId' => $siteId,
             'scope' => $scope,
         ];
+    }
+
+    private function checkReadableRelations(Plugin $plugin, User $admin): void
+    {
+        Craft::$app->getUser()->setIdentity($admin);
+
+        $categories = new Categories();
+        $categories->handle = 'readableCategories';
+        $tags = new Tags();
+        $tags->handle = 'readableTags';
+        $users = new UsersField();
+        $users->handle = 'readableUsers';
+        foreach ([$categories, $tags, $users] as $field) {
+            $this->assertReadOnlyRelation($field, $admin);
+        }
+
+        $assets = new AssetsField();
+        $assets->handle = 'writableAssets';
+        $entries = new EntriesField();
+        $entries->handle = 'writableEntries';
+        if (!FieldSupport::isWritable($assets) || !FieldSupport::isWritable($entries) || !FieldSupport::isRelation($assets) || !FieldSupport::isRelation($entries)) {
+            $this->failures[] = 'Assets and Entries are no longer writable relations.';
+        }
+        if (str_contains(FieldSupport::inputHint($assets), 'Writes are not supported') || str_contains(FieldSupport::inputHint($entries), 'Writes are not supported')) {
+            $this->failures[] = 'Writable relation hint was replaced with the read-only hint.';
+        }
+        $missingEntry = FieldSupport::prepare($entries, [999999999], $admin);
+        if (($missingEntry['status'] ?? null) !== 'fail') {
+            $this->failures[] = 'An Entries write was not validated: ' . json_encode($missingEntry);
+        }
+
+        $plain = new PlainText();
+        $plain->handle = 'readablePlain';
+        $table = new Table();
+        $table->handle = 'unreadableTable';
+        $matrix = new Matrix();
+        $matrix->handle = 'structureMatrix';
+        $stringable = new class {
+            public function __toString(): string
+            {
+                return 'represented';
+            }
+        };
+        if (
+            !FieldSupport::canRepresent($categories, null)
+            || !FieldSupport::canRepresent($plain, null)
+            || !FieldSupport::canRepresent($plain, $stringable)
+            || FieldSupport::readValue($plain, $stringable) !== 'represented'
+            || FieldSupport::canRepresent($plain, new \stdClass())
+            || FieldSupport::canRepresent($table, [['col' => 'a']])
+            || FieldSupport::canRepresent($matrix, null)
+            || !FieldSupport::canRepresent($table, null)
+        ) {
+            $this->failures[] = 'canRepresent does not match what readValue() can serialize.';
+        }
+
+        $category = new Category();
+        $category->id = 91001;
+        $category->title = 'Readable category';
+        $tag = new Tag();
+        $tag->id = 91002;
+        $tag->title = 'Readable tag';
+        $this->assertRelationRead($categories, [$category], 91001, 'Readable category', true);
+        $this->assertRelationRead($tags, [$tag], 91002, 'Readable tag', true);
+        $this->assertRelationRead($users, [$admin], (int)$admin->id, $admin->title ?? (string)$admin, false);
+
+        $asset = new Asset();
+        $asset->id = 91003;
+        $asset->title = 'Readable asset';
+        $assetRead = FieldSupport::readValue($assets, [$asset]);
+        if (($assetRead[0]['id'] ?? null) != 91003 || ($assetRead[0]['title'] ?? null) !== 'Readable asset' || array_key_exists('group', $assetRead[0] ?? []) || array_key_exists('section', $assetRead[0] ?? [])) {
+            $this->failures[] = 'Asset relation read changed shape: ' . json_encode($assetRead);
+        }
+
+        $existingCategory = Category::find()->status(null)->one();
+        if ($existingCategory instanceof Category) {
+            $group = $existingCategory->getGroup()->handle;
+            $queries = [
+                [$existingCategory],
+                Category::find()->id($existingCategory->id)->status(null)->siteId($existingCategory->siteId),
+                new ElementCollection([$existingCategory]),
+            ];
+            foreach ($queries as $value) {
+                $read = FieldSupport::readValue($categories, $value);
+                if (!array_is_list($read) || ($read[0]['id'] ?? null) != $existingCategory->id || ($read[0]['group'] ?? null) !== $group || array_key_exists('section', $read[0] ?? [])) {
+                    $this->failures[] = 'Category relation read lost its group handle: ' . json_encode($read);
+                }
+            }
+        }
+
+        $existingTag = Tag::find()->status(null)->one();
+        $createdTag = null;
+        if (!$existingTag instanceof Tag) {
+            $tagGroup = Craft::$app->getTags()->getAllTagGroups()[0] ?? null;
+            if ($tagGroup) {
+                $createdTag = new Tag();
+                $createdTag->groupId = $tagGroup->id;
+                $createdTag->title = 'Readable tag ' . uniqid();
+                if (Craft::$app->getElements()->saveElement($createdTag)) {
+                    $existingTag = $createdTag;
+                } else {
+                    $createdTag = null;
+                }
+            }
+        }
+        if ($existingTag instanceof Tag) {
+            try {
+                $group = $existingTag->getGroup()->handle;
+                $read = FieldSupport::readValue($tags, [$existingTag]);
+                if (($read[0]['group'] ?? null) !== $group || ($read[0]['id'] ?? null) != $existingTag->id || array_key_exists('section', $read[0] ?? [])) {
+                    $this->failures[] = 'Tag relation read lost its group handle: ' . json_encode($read);
+                }
+            } finally {
+                if ($createdTag instanceof Tag && $createdTag->id) {
+                    Craft::$app->getElements()->deleteElement($createdTag, true);
+                }
+            }
+        }
+
+        $existingEntry = Entry::find()->status(null)->one();
+        if ($existingEntry instanceof Entry) {
+            $read = FieldSupport::readValue($entries, [$existingEntry]);
+            if (($read[0]['section'] ?? null) !== $existingEntry->getSection()?->handle || ($read[0]['id'] ?? null) != $existingEntry->id) {
+                $this->failures[] = 'Entry relation read lost its section handle: ' . json_encode($read);
+            }
+        }
+
+        $helpers = new StructureHelpers();
+        $layouts = [];
+        foreach (Craft::$app->getEntries()->getAllEntryTypes() as $entryType) {
+            $relationFields = [];
+            foreach ($entryType->getFieldLayout()->getCustomFields() as $field) {
+                if (FieldSupport::isReadableRelation($field) && !FieldSupport::isWritable($field)) {
+                    $relationFields[] = $field;
+                }
+            }
+            if ($relationFields === []) {
+                continue;
+            }
+
+            $described = [];
+            foreach ($helpers->describeFields($entryType) as $row) {
+                $described[$row['handle']] = $row;
+            }
+            foreach ($relationFields as $field) {
+                $row = $described[$field->handle] ?? null;
+                $input = (string)($row['input'] ?? '');
+                if (
+                    !$row
+                    || ($row['writable'] ?? true) !== false
+                    || $input === 'String.'
+                    || !str_contains($input, 'Relation')
+                    || !str_contains($input, 'Writes are not supported')
+                ) {
+                    $this->failures[] = 'Schema did not keep a relation read-only: ' . $field::class . ' ' . $field->handle;
+                }
+            }
+
+            $element = Entry::find()->type($entryType)->status(null)->drafts(false)->revisions(false)->one();
+            if (!$element instanceof Entry) {
+                continue;
+            }
+
+            $root = $element;
+            for ($i = 0; $i < 8 && $root->getOwner() instanceof Entry; $i++) {
+                $root = $root->getOwner();
+            }
+            $rootId = (int)$root->id;
+            if (!isset($layouts[$rootId])) {
+                $layouts[$rootId] = $plugin->contentDesigner->readLayout($root, $admin);
+            }
+            $layout = $layouts[$rootId];
+            if (empty($layout['ok'])) {
+                $this->failures[] = 'read_layout failed for an entry with a readable relation: ' . ($layout['error'] ?? '');
+                continue;
+            }
+
+            if ($element->getOwner() instanceof Entry) {
+                $values = $this->fieldsForBlock($layout, (int)$element->id);
+                if ($values === null) {
+                    $this->failures[] = 'A Matrix block relation was omitted from read_layout.';
+                    continue;
+                }
+                $this->assertRelationValues($relationFields, $values);
+                continue;
+            }
+
+            $this->assertRelationValues($relationFields, is_array($layout['fields'] ?? null) ? $layout['fields'] : []);
+        }
+    }
+
+    private function assertReadOnlyRelation(FieldInterface $field, User $admin): void
+    {
+        $hint = FieldSupport::inputHint($field);
+        $writable = FieldSupport::isWritable($field) && !FieldSupport::isReadOnly($field) && !FieldSupport::isMatrix($field);
+        $prepared = FieldSupport::prepare($field, [1], $admin);
+        if (
+            $writable
+            || FieldSupport::isWritable($field)
+            || FieldSupport::isRelation($field)
+            || !FieldSupport::isReadableRelation($field)
+            || $hint === 'String.'
+            || !str_contains($hint, 'Relation')
+            || !str_contains(strtolower($hint), 'id')
+            || !str_contains(strtolower($hint), 'title')
+            || !str_contains($hint, 'Writes are not supported')
+            || ($prepared['status'] ?? null) !== 'skip'
+            || !str_contains((string)($prepared['message'] ?? ''), 'not writable and was skipped')
+        ) {
+            $this->failures[] = $field::class . ' was not kept readable and non-writable: ' . json_encode($prepared) . ' ' . $hint;
+        }
+    }
+
+    /**
+     * @param array<int, ElementInterface>|ElementCollection|\craft\elements\db\ElementQuery $value
+     */
+    private function assertRelationRead(FieldInterface $field, mixed $value, int $id, string $title, bool $grouped): void
+    {
+        $read = FieldSupport::readValue($field, $value);
+        $row = $read[0] ?? null;
+        if (!array_is_list($read) || !is_array($row) || (int)($row['id'] ?? 0) !== $id || ($row['title'] ?? null) !== $title) {
+            $this->failures[] = $field::class . ' did not read as {id, title}: ' . json_encode($read);
+
+            return;
+        }
+        if ($grouped && !array_key_exists('group', $row)) {
+            $this->failures[] = $field::class . ' relation read was missing group.';
+        }
+        if (!$grouped && (array_key_exists('group', $row) || array_key_exists('section', $row))) {
+            $this->failures[] = $field::class . ' relation read included an extra label: ' . json_encode($row);
+        }
+    }
+
+    /**
+     * @param FieldInterface[] $relationFields
+     * @param array<string, mixed> $values
+     */
+    private function assertRelationValues(array $relationFields, array $values): void
+    {
+        foreach ($relationFields as $field) {
+            $rows = $values[$field->handle] ?? null;
+            if (!array_key_exists($field->handle, $values) || !is_array($rows) || !array_is_list($rows)) {
+                $this->failures[] = 'A non-writable relation was omitted from read_layout (' . $field::class . ' ' . $field->handle . ').';
+                continue;
+            }
+            foreach ($rows as $row) {
+                if (!is_array($row) || !array_key_exists('id', $row) || !array_key_exists('title', $row)) {
+                    $this->failures[] = 'A relation read was not a list of {id, title} (' . $field::class . ').';
+                    break;
+                }
+                if (($field instanceof Categories || $field instanceof Tags) && !array_key_exists('group', $row)) {
+                    $this->failures[] = 'A category or tag read was missing its group handle.';
+                }
+                if ($field instanceof UsersField && (array_key_exists('group', $row) || array_key_exists('section', $row))) {
+                    $this->failures[] = 'A user relation read included a label that element does not have.';
+                }
+            }
+        }
+    }
+
+    /**
+     * @return array<string, mixed>|null
+     */
+    private function fieldsForBlock(array $node, int $blockId): ?array
+    {
+        if (
+            isset($node['id'], $node['type'], $node['fields'])
+            && is_array($node['fields'])
+            && (int)$node['id'] === $blockId
+        ) {
+            return $node['fields'];
+        }
+
+        foreach ($node as $value) {
+            if (!is_array($value)) {
+                continue;
+            }
+            $found = $this->fieldsForBlock($value, $blockId);
+            if ($found !== null) {
+                return $found;
+            }
+        }
+
+        return null;
     }
 
     private function cleanup(): void

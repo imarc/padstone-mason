@@ -775,11 +775,15 @@ class ContentDesigner extends Component
                 $matrices[$field->handle] = $adapter->readField($entry, $field);
                 continue;
             }
-            if (!FieldSupport::isWritable($field) || FieldSupport::isReadOnly($field)) {
+            if (FieldSupport::isReadOnly($field)) {
                 continue;
             }
             try {
-                $fields[$field->handle] = FieldSupport::readValue($field, $entry->getFieldValue($field->handle));
+                $raw = $entry->getFieldValue($field->handle);
+                if (!FieldSupport::canRepresent($field, $raw)) {
+                    continue;
+                }
+                $fields[$field->handle] = FieldSupport::readValue($field, $raw);
             } catch (InvalidFieldException) {
             }
         }
@@ -805,11 +809,15 @@ class ContentDesigner extends Component
                     $item['fields'][$nested->handle] = $this->readBlocks($block, $nested);
                     continue;
                 }
-                if (!FieldSupport::isWritable($nested) || FieldSupport::isReadOnly($nested)) {
+                if (FieldSupport::isReadOnly($nested)) {
                     continue;
                 }
                 try {
-                    $item['fields'][$nested->handle] = FieldSupport::readValue($nested, $block->getFieldValue($nested->handle));
+                    $raw = $block->getFieldValue($nested->handle);
+                    if (!FieldSupport::canRepresent($nested, $raw)) {
+                        continue;
+                    }
+                    $item['fields'][$nested->handle] = FieldSupport::readValue($nested, $raw);
                 } catch (InvalidFieldException) {
                 }
             }

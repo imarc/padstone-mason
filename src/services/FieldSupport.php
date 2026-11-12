@@ -6,9 +6,14 @@ use craft\base\ElementInterface;
 use craft\base\FieldInterface;
 use craft\ckeditor\Field as CkeditorField;
 use craft\elements\Asset;
+use craft\elements\Category;
+use craft\elements\ElementCollection;
 use craft\elements\Entry;
+use craft\elements\Tag;
 use craft\elements\User;
+use craft\elements\db\ElementQuery;
 use craft\fields\Assets;
+use craft\fields\BaseRelationField;
 use craft\fields\Dropdown;
 use craft\fields\Entries as EntriesField;
 use craft\fields\Lightswitch;
@@ -17,6 +22,7 @@ use craft\fields\Matrix;
 use craft\fields\PlainText;
 use craft\fields\data\LinkData;
 use Craft;
+use yii\base\InvalidConfigException;
 
 class FieldSupport
 {
@@ -100,6 +106,9 @@ class FieldSupport
         }
         if (self::isRelation($field)) {
             return 'Existing element id, or a list of ids allowed by this field\'s sources. Raw uploads in field values are refused; use list_conversation_assets or import_asset, then pass those ids.';
+        }
+        if (self::isReadableRelation($field)) {
+            return 'Relation field. Reads return existing element ids and titles as a list of {id, title}. Writes are not supported.';
         }
         if ($field instanceof CkeditorField) {
             return 'HTML string.';
@@ -187,26 +196,18 @@ class FieldSupport
             return $value;
         }
 
-        if (self::isRelation($field)) {
-            if ($value instanceof \craft\elements\db\ElementQuery) {
+        if (self::isReadableRelation($field)) {
+            if ($value instanceof ElementQuery) {
                 $elements = $value->status(null)->all();
+            } elseif ($value instanceof ElementCollection) {
+                $elements = $value->all();
             } elseif (is_array($value)) {
                 $elements = $value;
             } else {
                 return [];
             }
 
-            return array_map(function(ElementInterface $element) {
-                $row = [
-                    'id' => $element->id,
-                    'title' => $element->title ?? (string)$element,
-                ];
-                if ($element instanceof Entry) {
-                    $row['section'] = $element->getSection()?->handle;
-                }
-
-                return $row;
-            }, $elements);
+            return array_values(array_map(fn(ElementInterface $element) => self::relationRow($element), $elements));
         }
 
         if (is_bool($value) || is_int($value) || is_float($value) || is_string($value) || $value === null) {
@@ -220,9 +221,64 @@ class FieldSupport
         return null;
     }
 
+    /**
+     * Assets and Entries — the relation fields Mason can write.
+     * Every other BaseRelationField stays readable only.
+     */
     public static function isRelation(FieldInterface $field): bool
     {
         return $field instanceof Assets || $field instanceof EntriesField;
+    }
+
+    /**
+     * Any Craft relation field. Readable even when isWritable() is false.
+     */
+    public static function isReadableRelation(FieldInterface $field): bool
+    {
+        return $field instanceof BaseRelationField;
+    }
+
+    /**
+     * Whether readValue() can serialize this into a layout read.
+     * Structure fields are walked by their adapters instead. Read-only fields are a separate omit.
+     */
+    public static function canRepresent(FieldInterface $field, mixed $value): bool
+    {
+        if (self::isStructureContainer($field)) {
+            return false;
+        }
+
+        if ($field instanceof Link || $value instanceof LinkData || self::isReadableRelation($field)) {
+            return true;
+        }
+
+        if (is_bool($value) || is_int($value) || is_float($value) || is_string($value) || $value === null) {
+            return true;
+        }
+
+        return is_object($value) && method_exists($value, '__toString');
+    }
+
+    /**
+     * @return array{id: int|string|null, title: string, section?: string|null, group?: string|null}
+     */
+    private static function relationRow(ElementInterface $element): array
+    {
+        $row = [
+            'id' => $element->id,
+            'title' => $element->title ?? (string)$element,
+        ];
+        if ($element instanceof Entry) {
+            $row['section'] = $element->getSection()?->handle;
+        } elseif ($element instanceof Category || $element instanceof Tag) {
+            try {
+                $row['group'] = $element->getGroup()->handle;
+            } catch (InvalidConfigException) {
+                $row['group'] = null;
+            }
+        }
+
+        return $row;
     }
 
     public static function looksLikeUpload(mixed $value): bool
