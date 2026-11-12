@@ -59,10 +59,12 @@ class Conversations extends Component
             if (!$record instanceof ConversationRecord) {
                 continue;
             }
-            $title = $this->entryTitle($record);
-            if ($title !== null && $title !== $record->title) {
-                ConversationRecord::updateAll(['title' => $title], ['id' => $record->id]);
-                $record->title = $title;
+            if (!$this->hasCustomTitle($record)) {
+                $title = $this->entryTitle($record);
+                if ($title !== null && $title !== $record->title) {
+                    ConversationRecord::updateAll(['title' => $title], ['id' => $record->id]);
+                    $record->title = $title;
+                }
             }
             $records[] = $record;
         }
@@ -160,18 +162,45 @@ class Conversations extends Component
         $conversation->entryId = $entryId;
         $conversation->draftId = $draftId;
         $conversation->siteId = $siteId;
-        $title = $this->entryTitle($conversation);
-        if ($title !== null) {
-            $conversation->title = $title;
+        if (!$this->hasCustomTitle($conversation)) {
+            $title = $this->entryTitle($conversation);
+            if ($title !== null) {
+                $conversation->title = $title;
+            }
         }
         $conversation->save(false);
     }
 
     public function applyDerivedTitle(ConversationRecord $conversation): void
     {
+        if ($this->hasCustomTitle($conversation)) {
+            return;
+        }
+
         $title = $this->derivedTitle($conversation);
         ConversationRecord::updateAll(['title' => $title], ['id' => $conversation->id]);
         $conversation->title = $title;
+    }
+
+    /**
+     * @return array{ok: bool, title?: string, error?: string}
+     */
+    public function saveCustomTitle(ConversationRecord $conversation, string $subject): array
+    {
+        $trimmed = trim($subject);
+        if ($trimmed === '') {
+            return ['ok' => false, 'error' => 'A subject is required.'];
+        }
+
+        if (mb_strlen($trimmed) > self::TITLE_LIMIT) {
+            $trimmed = mb_substr($trimmed, 0, self::TITLE_LIMIT);
+        }
+
+        $conversation->title = $trimmed;
+        $conversation->titleCustom = true;
+        $conversation->save(false);
+
+        return ['ok' => true, 'title' => $trimmed];
     }
 
     public function derivedTitle(ConversationRecord $conversation): string
@@ -269,7 +298,12 @@ class Conversations extends Component
         $message->metadata = $metadata ? Json::encode($metadata) : null;
         $message->save(false);
 
-        if ($role === 'user' && !$conversation->entryId && $this->isPlaceholderTitle((string)$conversation->title)) {
+        if (
+            $role === 'user'
+            && !$this->hasCustomTitle($conversation)
+            && !$conversation->entryId
+            && $this->isPlaceholderTitle((string)$conversation->title)
+        ) {
             $conversation->title = $this->trimTitle((string)$content);
         }
         $conversation->save(false);
@@ -395,6 +429,11 @@ class Conversations extends Component
     private function isPlaceholderTitle(string $title): bool
     {
         return $title === '' || $title === self::NEW_CHAT_TITLE;
+    }
+
+    private function hasCustomTitle(ConversationRecord $conversation): bool
+    {
+        return (bool)$conversation->titleCustom;
     }
 
     private function entryTitle(ConversationRecord $conversation): ?string

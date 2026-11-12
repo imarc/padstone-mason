@@ -278,6 +278,41 @@ class ChatController extends Controller
         return $this->asJson($result);
     }
 
+    public function actionRenameSubject(): Response
+    {
+        $this->requirePostRequest();
+        $this->requireUse();
+        $user = Craft::$app->getUser()->getIdentity();
+        $conversation = Plugin::getInstance()->conversations->findOwned(
+            (int)$this->request->getRequiredBodyParam('conversationId'),
+            $user->id,
+        );
+        if (!$conversation) {
+            throw new ForbiddenHttpException('That conversation is not available.');
+        }
+
+        $result = Plugin::getInstance()->conversations->saveCustomTitle(
+            $conversation,
+            (string)$this->request->getBodyParam('subject', ''),
+        );
+        if (empty($result['ok'])) {
+            return $this->asJson([
+                'ok' => false,
+                'error' => $result['error'] ?? 'The subject could not be saved.',
+                'title' => (string)$conversation->title,
+            ]);
+        }
+
+        $conversation->refresh();
+
+        return $this->asJson([
+            'ok' => true,
+            'conversationId' => (int)$conversation->id,
+            'title' => (string)$result['title'],
+            'conversations' => $this->summariesForRequest($user, $conversation),
+        ]);
+    }
+
     public function actionDelete(): Response
     {
         $this->requirePostRequest();

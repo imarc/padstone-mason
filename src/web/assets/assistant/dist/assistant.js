@@ -5,6 +5,9 @@
 
   const pendingFiles = new WeakMap();
   const REOPEN_KEY = 'padstone-mason-reopen';
+  const PREVIEW_WIDTH_KEY = 'padstone-mason-preview-drawer-width';
+  const MIN_DRAWER_WIDTH = 280;
+  const MAX_DRAWER_WIDTH_RATIO = 0.95;
 
   function rootFrom(element) {
     return element.closest('[data-assistant-root]');
@@ -310,6 +313,10 @@
     if (remove) {
       remove.hidden = !value;
     }
+    const subjectWrap = root.querySelector('[data-assistant-subject-wrap]');
+    if (subjectWrap) {
+      subjectWrap.hidden = !value;
+    }
   }
 
   function clearAttachments(root) {
@@ -346,6 +353,99 @@
       remove.textContent = '×';
       chip.append(name, remove);
       strip.appendChild(chip);
+    });
+  }
+
+  function setSubjectHeader(root, title) {
+    const wrap = root.querySelector('[data-assistant-subject-wrap]');
+    if (!wrap) {
+      return;
+    }
+    wrap.hidden = false;
+    const heading = wrap.querySelector('[data-assistant-subject]');
+    if (heading) {
+      heading.textContent = title || 'New chat';
+    }
+  }
+
+  function subjectModal(root) {
+    return root.querySelector('[data-assistant-subject-modal]');
+  }
+
+  function openSubjectModal(root) {
+    const modal = subjectModal(root);
+    if (!modal) {
+      return;
+    }
+    const heading = root.querySelector('[data-assistant-subject]');
+    const input = modal.querySelector('[data-assistant-subject-input]');
+    const error = modal.querySelector('[data-assistant-subject-error]');
+    if (error) {
+      error.hidden = true;
+      error.textContent = '';
+    }
+    if (input) {
+      input.value = heading ? heading.textContent : '';
+    }
+    modal.hidden = false;
+    const edit = root.querySelector('[data-assistant-edit-subject]');
+    if (edit) {
+      edit.setAttribute('aria-expanded', 'true');
+    }
+    if (input) {
+      input.focus();
+      input.select();
+    }
+  }
+
+  function closeSubjectModal(root) {
+    const modal = subjectModal(root);
+    if (!modal) {
+      return;
+    }
+    modal.hidden = true;
+    const error = modal.querySelector('[data-assistant-subject-error]');
+    if (error) {
+      error.hidden = true;
+      error.textContent = '';
+    }
+    const edit = root.querySelector('[data-assistant-edit-subject]');
+    if (edit) {
+      edit.setAttribute('aria-expanded', 'false');
+      edit.focus();
+    }
+  }
+
+  function saveSubject(root) {
+    const modal = subjectModal(root);
+    const input = modal && modal.querySelector('[data-assistant-subject-input]');
+    const conversationId = root.getAttribute('data-conversation-id');
+    if (!modal || !input || !conversationId) {
+      return;
+    }
+    const subject = input.value;
+    const error = modal.querySelector('[data-assistant-subject-error]');
+    Craft.sendActionRequest('POST', 'padstone-mason/chat/rename-subject', {
+      data: Object.assign({ conversationId: conversationId, subject: subject }, requestData(root))
+    }).then(function(response) {
+      const data = response.data;
+      if (!data.ok) {
+        if (error) {
+          error.textContent = data.error || 'The subject could not be saved.';
+          error.hidden = false;
+        }
+        return;
+      }
+      setSubjectHeader(root, data.title);
+      if (data.conversations) {
+        renderConversations(root, data.conversations, conversationId);
+      }
+      closeSubjectModal(root);
+    }).catch(function() {
+      if (error) {
+        error.textContent = 'The subject could not be saved.';
+        error.hidden = false;
+      }
     });
   }
 
@@ -441,6 +541,9 @@
     if (Object.prototype.hasOwnProperty.call(data, 'draftId')) {
       setBoundDraftId(root, data.draftId);
     }
+    if (data.title) {
+      setSubjectHeader(root, data.title);
+    }
     clearAttachments(root);
     showPreview(root, data);
     setBoundBadge(root, data);
@@ -518,9 +621,120 @@
     button.hidden = !root.getAttribute('data-preview-url');
   }
 
+  function drawerMaxWidth() {
+    return Math.floor(window.innerWidth * MAX_DRAWER_WIDTH_RATIO);
+  }
+
+  function defaultDrawerWidth() {
+    return Math.min(760, Math.floor(window.innerWidth * 0.48));
+  }
+
+  function readDrawerWidth() {
+    try {
+      const raw = localStorage.getItem(PREVIEW_WIDTH_KEY);
+      const value = raw ? parseInt(raw, 10) : NaN;
+      if (Number.isFinite(value) && value >= MIN_DRAWER_WIDTH) {
+        return Math.min(value, drawerMaxWidth());
+      }
+    } catch (e) {
+      // Ignore storage failures.
+    }
+
+    return null;
+  }
+
+  function saveDrawerWidth(px) {
+    try {
+      localStorage.setItem(PREVIEW_WIDTH_KEY, String(Math.round(px)));
+    } catch (e) {
+      // Ignore storage failures.
+    }
+  }
+
+  function drawerResizable() {
+    return window.matchMedia('(min-width: 701px)').matches;
+  }
+
+  function applyDrawerWidth(panel, widthPx) {
+    if (!panel || !widthPx || !drawerResizable()) {
+      return;
+    }
+    panel.style.width = widthPx + 'px';
+    panel.style.maxWidth = 'none';
+  }
+
+  function syncDrawerWidth(panel) {
+    if (!panel) {
+      return;
+    }
+    if (!drawerResizable()) {
+      panel.style.width = '';
+      panel.style.maxWidth = '';
+      return;
+    }
+    applyDrawerWidth(panel, readDrawerWidth() || defaultDrawerWidth());
+  }
+
+  function initDrawerResize(panel, handle) {
+    let dragging = false;
+
+    function widthFromPointer(clientX) {
+      return Math.min(drawerMaxWidth(), Math.max(MIN_DRAWER_WIDTH, window.innerWidth - clientX));
+    }
+
+    handle.addEventListener('pointerdown', function(event) {
+      if (event.button !== 0 || !drawerResizable()) {
+        return;
+      }
+      dragging = true;
+      handle.setPointerCapture(event.pointerId);
+      document.body.classList.add('padstone-mason__drawer-resizing');
+      applyDrawerWidth(panel, widthFromPointer(event.clientX));
+      event.preventDefault();
+    });
+
+    handle.addEventListener('pointermove', function(event) {
+      if (!dragging) {
+        return;
+      }
+      applyDrawerWidth(panel, widthFromPointer(event.clientX));
+    });
+
+    function endDrag(event) {
+      if (!dragging) {
+        return;
+      }
+      dragging = false;
+      document.body.classList.remove('padstone-mason__drawer-resizing');
+      try {
+        handle.releasePointerCapture(event.pointerId);
+      } catch (e) {
+        // Ignore release failures.
+      }
+      saveDrawerWidth(panel.getBoundingClientRect().width);
+    }
+
+    handle.addEventListener('pointerup', endDrag);
+    handle.addEventListener('pointercancel', endDrag);
+
+    handle.addEventListener('keydown', function(event) {
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') {
+        return;
+      }
+      event.preventDefault();
+      const step = event.shiftKey ? 48 : 16;
+      const current = panel.getBoundingClientRect().width;
+      const delta = event.key === 'ArrowLeft' ? step : -step;
+      const next = Math.min(drawerMaxWidth(), Math.max(MIN_DRAWER_WIDTH, current + delta));
+      applyDrawerWidth(panel, next);
+      saveDrawerWidth(next);
+    });
+  }
+
   function drawer() {
     let element = document.querySelector('[data-assistant-drawer]');
     if (element) {
+      syncDrawerWidth(element.querySelector('.padstone-mason__drawer-panel'));
       return element;
     }
 
@@ -537,6 +751,14 @@
     panel.className = 'padstone-mason__drawer-panel';
     panel.setAttribute('role', 'dialog');
     panel.setAttribute('aria-label', 'Preview');
+
+    const resize = document.createElement('div');
+    resize.className = 'padstone-mason__drawer-resize';
+    resize.dataset.assistantDrawerResize = '';
+    resize.setAttribute('role', 'separator');
+    resize.setAttribute('aria-orientation', 'vertical');
+    resize.setAttribute('aria-label', 'Resize preview panel');
+    resize.tabIndex = 0;
 
     const header = document.createElement('div');
     header.className = 'padstone-mason__drawer-header';
@@ -565,9 +787,11 @@
     edit.textContent = 'Edit draft';
     links.append(open, edit);
 
-    panel.append(header, frame, links);
+    panel.append(resize, header, frame, links);
     element.append(backdrop, panel);
     document.body.appendChild(element);
+    syncDrawerWidth(panel);
+    initDrawerResize(panel, resize);
 
     return element;
   }
@@ -825,6 +1049,27 @@
       return;
     }
 
+    const editSubject = event.target.closest('[data-assistant-edit-subject]');
+    if (editSubject) {
+      event.preventDefault();
+      openSubjectModal(rootFrom(editSubject));
+      return;
+    }
+
+    const subjectSave = event.target.closest('[data-assistant-subject-save]');
+    if (subjectSave) {
+      event.preventDefault();
+      saveSubject(rootFrom(subjectSave));
+      return;
+    }
+
+    const subjectCancel = event.target.closest('[data-assistant-subject-cancel]');
+    if (subjectCancel) {
+      event.preventDefault();
+      closeSubjectModal(rootFrom(subjectCancel));
+      return;
+    }
+
     const remove = event.target.closest('[data-assistant-delete]');
     if (remove) {
       event.preventDefault();
@@ -884,7 +1129,24 @@
   });
 
   document.addEventListener('keydown', function(event) {
+    const subjectInput = event.target.closest && event.target.closest('[data-assistant-subject-input]');
+    if (
+      subjectInput
+      && event.key === 'Enter'
+      && !event.isComposing
+      && !event.shiftKey
+    ) {
+      event.preventDefault();
+      saveSubject(rootFrom(subjectInput));
+      return;
+    }
+
     if (event.key !== 'Escape') {
+      return;
+    }
+    const subjectFrom = event.target.closest && event.target.closest('[data-assistant-subject-modal]');
+    if (subjectFrom && !subjectFrom.hidden) {
+      closeSubjectModal(rootFrom(subjectFrom));
       return;
     }
     const element = document.querySelector('[data-assistant-drawer]');

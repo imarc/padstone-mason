@@ -1282,6 +1282,13 @@ class CheckController extends Controller
             return;
         }
 
+        $customColumn = Craft::$app->getDb()->getTableSchema(ConversationRecord::tableName())?->getColumn('titleCustom');
+        if (!$customColumn || $customColumn->allowNull) {
+            $this->failures[] = 'Conversations are missing a required titleCustom column.';
+
+            return;
+        }
+
         $index = $this->methodSource(new ReflectionMethod(ChatController::class, 'actionIndex'));
         $panel = $this->methodSource(new ReflectionMethod(ChatController::class, 'actionPanel'));
         if (str_contains($index, '->open(') || str_contains($panel, '->open(')) {
@@ -1316,6 +1323,45 @@ class CheckController extends Controller
         }
         if ($first->title !== 'Assistant multi chat alpha' || $otherEntry->title !== 'Assistant multi chat beta') {
             $this->failures[] = 'A bound conversation did not use the entry title.';
+        }
+
+        $custom = $this->startedConversation($plugin, $admin, $alpha);
+        if ($custom) {
+            $saved = $plugin->conversations->saveCustomTitle($custom, 'Homepage rewrite');
+            if (empty($saved['ok']) || ($saved['title'] ?? '') !== 'Homepage rewrite') {
+                $this->failures[] = 'Saving a custom subject failed.';
+            }
+            $custom->refresh();
+            if (!$custom->titleCustom || $custom->title !== 'Homepage rewrite') {
+                $this->failures[] = 'A custom subject was not stored on the conversation.';
+            }
+            $plugin->conversations->bind($custom, (int)$beta->id, null, $siteId);
+            $custom->refresh();
+            if ($custom->title !== 'Homepage rewrite') {
+                $this->failures[] = 'Binding an entry replaced a custom subject.';
+            }
+            $plugin->conversations->listForUser($admin->id, (int)$beta->id, $siteId);
+            $custom->refresh();
+            if ($custom->title !== 'Homepage rewrite') {
+                $this->failures[] = 'Listing conversations replaced a custom subject.';
+            }
+            $plugin->conversations->applyDerivedTitle($custom);
+            $custom->refresh();
+            if ($custom->title !== 'Homepage rewrite') {
+                $this->failures[] = 'applyDerivedTitle replaced a custom subject.';
+            }
+            $blank = $plugin->conversations->saveCustomTitle($custom, '   ');
+            if (!empty($blank['ok'])) {
+                $this->failures[] = 'A blank custom subject was accepted.';
+            }
+            $custom->refresh();
+            if ($custom->title !== 'Homepage rewrite') {
+                $this->failures[] = 'Rejecting a blank subject changed the title.';
+            }
+            $longCustom = $plugin->conversations->saveCustomTitle($custom, str_repeat('n', 90));
+            if (empty($longCustom['ok']) || ($longCustom['title'] ?? '') !== str_repeat('n', 80)) {
+                $this->failures[] = 'A long custom subject was not shortened to 80 characters.';
+            }
         }
 
         $plugin->conversations->addMessage($unbound, 'user', 'Assistant multi chat unbound message');
@@ -1420,6 +1466,9 @@ class CheckController extends Controller
         ) {
             $this->failures[] = 'Another user can list, read, or delete the conversation.';
         }
+        if ($custom && $plugin->conversations->findOwned((int)$custom->id, (int)$other->id) !== null) {
+            $this->failures[] = 'Another user could resolve a conversation for renaming.';
+        }
 
         $draftId = (int)$second->draftId;
         $messageCount = (int)MessageRecord::find()->where(['conversationId' => (int)$second->id])->count();
@@ -1458,6 +1507,24 @@ class CheckController extends Controller
         }
         $css = (string)file_get_contents(Plugin::getInstance()->getBasePath() . '/web/assets/assistant/dist/assistant.css');
         $panel = (string)file_get_contents(Plugin::getInstance()->getBasePath() . '/templates/_panel.twig');
+        $rename = $this->methodSource(new ReflectionMethod(ChatController::class, 'actionRenameSubject'));
+        if (
+            !str_contains($rename, 'saveCustomTitle')
+            || !str_contains($js, 'padstone-mason/chat/rename-subject')
+            || !str_contains($js, 'data-assistant-edit-subject')
+            || !str_contains($js, 'data-assistant-subject-save')
+            || !str_contains($panel, 'data-assistant-subject')
+            || !str_contains($panel, 'aria-label="Edit subject"')
+        ) {
+            $this->failures[] = 'The panel does not support editing the discussion subject.';
+        }
+        if (
+            !str_contains($js, 'padstone-mason-preview-drawer-width')
+            || !str_contains($js, 'assistantDrawerResize')
+            || !str_contains($css, 'padstone-mason__drawer-resize')
+        ) {
+            $this->failures[] = 'The preview drawer cannot be resized.';
+        }
         if (
             !str_contains($js, 'padstone-mason__message-tools')
             || !str_contains($css, 'padstone-mason__message-tools')
@@ -1500,6 +1567,13 @@ class CheckController extends Controller
                 $siteId,
                 'entry',
             ));
+            $emptyHtml = $view->renderTemplate('padstone-mason/_panel', $this->panelRender(
+                $plugin->conversations->summaries($admin->id, null, null),
+                null,
+                null,
+                null,
+                'all',
+            ));
             if (
                 !str_contains($allHtml, 'Assistant multi chat alpha')
                 || !str_contains($allHtml, 'Assistant multi chat beta')
@@ -1513,6 +1587,10 @@ class CheckController extends Controller
                 || str_contains($entryHtml, 'Assistant multi chat beta')
                 || str_contains($entryHtml, 'Assistant multi chat unbound message')
                 || ($first->draftId && !str_contains($entryHtml, 'data-bound-draft-id="' . (int)$first->draftId . '"'))
+                || !str_contains($allHtml, 'data-assistant-subject-wrap')
+                || !str_contains($allHtml, 'data-assistant-edit-subject')
+                || !str_contains($emptyHtml, 'data-assistant-subject-wrap hidden')
+                || str_contains($allHtml, 'data-assistant-subject-wrap hidden')
             ) {
                 $this->failures[] = 'Chat and the entry slideout did not list the conversations for their scope.';
             }
@@ -2200,9 +2278,9 @@ class CheckController extends Controller
      * @param array<int, array{id: int, title: string, entryId: ?int, draftId: ?int}> $conversations
      * @return array<string, mixed>
      */
-    private function panelRender(array $conversations, ConversationRecord $conversation, ?int $entryId, ?int $siteId, string $scope): array
+    private function panelRender(array $conversations, ?ConversationRecord $conversation, ?int $entryId, ?int $siteId, string $scope): array
     {
-        $boundDraftId = $conversation->draftId ? (int)$conversation->draftId : null;
+        $boundDraftId = $conversation?->draftId ? (int)$conversation->draftId : null;
 
         return [
             'conversation' => $conversation,

@@ -11,6 +11,7 @@ use craft\db\ActiveRecord;
  * @property int|null $draftId
  * @property int|null $siteId
  * @property string $title
+ * @property bool $titleCustom
  */
 class ConversationRecord extends ActiveRecord
 {

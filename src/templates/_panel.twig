@@ -40,6 +40,12 @@
         </aside>
 
         <div class="padstone-mason__chat">
+            <header class="padstone-mason__subject" data-assistant-subject-wrap{% if not conversation %} hidden{% endif %}>
+                <span class="padstone-mason__subject-line">
+                    <h2 class="padstone-mason__subject-title" data-assistant-subject>{{ conversation.title ?? 'New chat' }}</h2>
+                    <button type="button" class="btn small padstone-mason__subject-edit" data-assistant-edit-subject data-icon="edit" aria-label="Edit subject"></button>
+                </span>
+            </header>
             <p class="padstone-mason__note">{{ draftNote }}</p>
 
             <div class="padstone-mason__transcript" data-assistant-transcript>
@@ -78,6 +84,22 @@
                     <button type="button" class="btn" data-assistant-publish>Publish draft</button>
                     <button type="button" class="btn" data-assistant-preview-toggle {% if not previewUrl %}hidden{% endif %} aria-expanded="false">Preview</button>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="padstone-mason__subject-modal" data-assistant-subject-modal hidden>
+        <div class="padstone-mason__subject-modal-backdrop" data-assistant-subject-cancel></div>
+        <div class="padstone-mason__subject-dialog" role="dialog" aria-modal="true" aria-labelledby="padstone-mason-subject-heading">
+            <h2 id="padstone-mason-subject-heading" class="padstone-mason__subject-dialog-heading">Edit subject</h2>
+            <label class="field">
+                <span class="visually-hidden">Subject</span>
+                <input type="text" class="text fullwidth" data-assistant-subject-input maxlength="80" autocomplete="off">
+            </label>
+            <p class="padstone-mason__subject-error" data-assistant-subject-error hidden></p>
+            <div class="btngroup">
+                <button type="button" class="btn submit" data-assistant-subject-save>Save</button>
+                <button type="button" class="btn" data-assistant-subject-cancel>Cancel</button>
             </div>
         </div>
     </div>

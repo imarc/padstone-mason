@@ -37,7 +37,7 @@ class Plugin extends BasePlugin
 {
     public const PERMISSION = 'padstoneMason:use';
 
-    public string $schemaVersion = '1.2.0';
+    public string $schemaVersion = '1.3.0';
 
     public bool $hasCpSettings = true;
 
