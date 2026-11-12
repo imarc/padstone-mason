@@ -1,4 +1,4 @@
-# Padstone Mason (Wildly Experimental)
+# Padstone Mason (Experimental)
 
 Control-panel chat for entries the current user can save. It edits the fields on that entry's layout, including structure fields such as the hero and Content Designer (Matrix by default; Neo via the optional [padstone-mason-neo](https://github.com/imarc/padstone-mason-neo) companion) when they are present. New entries can be created only in the sections listed in settings. If a request does not name one allowed section and one entry type on it, Mason asks which to use and shows the sections and entry types it knows. Edits go to a named draft called **Mason**. A second chat on the same entry gets the next numbered draft, such as **Mason 2**. Nothing goes live until someone publishes that draft.
 
