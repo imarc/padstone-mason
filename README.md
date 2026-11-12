@@ -8,11 +8,11 @@ Sites that still use Spicy Web Neo for Content Designer should also install the 
 
 ## Setup
 
-1. Require it from the private repo [imarc/padstone-mason](https://github.com/imarc/padstone-mason). Composer needs access to that repo. There is no tagged release yet, so require the `main` branch.
+1. Require it from the private repo [imarc/padstone-mason](https://github.com/imarc/padstone-mason). Composer needs access to that repo.
 
    ```
    composer config repositories.padstone-mason vcs https://github.com/imarc/padstone-mason.git
-   composer require imarc/craft-padstone-mason:dev-main
+   composer require imarc/craft-padstone-mason:^0.1.0
    ```
 
 2. Install the plugin (`padstone-mason`).
