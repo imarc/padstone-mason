@@ -307,10 +307,6 @@
       li.appendChild(button)
       list.appendChild(li)
     })
-    const remove = root.querySelector('[data-assistant-delete]')
-    if (remove) {
-      remove.hidden = !selectedId
-    }
   }
 
   function assetFigures(assets) {

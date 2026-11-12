@@ -219,7 +219,8 @@ a.padstone-mason__bound-title:hover {
   white-space: nowrap;
 }
 
-.padstone-mason__subject-edit {
+.padstone-mason__subject-edit,
+.padstone-mason__subject-delete {
   flex: none;
   align-self: center;
 }

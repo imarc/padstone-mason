@@ -36,7 +36,6 @@
                     </li>
                 {% endfor %}
             </ul>
-            <button type="button" class="btn" data-assistant-delete {% if not conversation %}hidden{% endif %}>Delete</button>
         </aside>
 
         <div class="padstone-mason__chat">
@@ -44,6 +43,7 @@
                 <span class="padstone-mason__subject-line">
                     <h2 class="padstone-mason__subject-title" data-assistant-subject>{{ conversation.title ?? 'New chat' }}</h2>
                     <button type="button" class="btn small padstone-mason__subject-edit" data-assistant-edit-subject data-icon="edit" aria-label="Edit subject"></button>
+                    <button type="button" class="btn small padstone-mason__subject-delete" data-assistant-delete data-icon="trash" aria-label="Delete chat"{% if not conversation %} hidden{% endif %}></button>
                 </span>
             </header>
             <p class="padstone-mason__note">{{ draftNote }}</p>
