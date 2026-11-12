@@ -6,8 +6,70 @@
   const pendingFiles = new WeakMap();
   const REOPEN_KEY = 'padstone-mason-reopen';
   const PREVIEW_WIDTH_KEY = 'padstone-mason-preview-drawer-width';
+  const CHAT_HASH_PREFIX = 'chat-';
   const MIN_DRAWER_WIDTH = 280;
   const MAX_DRAWER_WIDTH_RATIO = 0.95;
+
+  function conversationIdFromHash() {
+    const raw = (window.location.hash || '').replace(/^#/, '');
+    if (raw.indexOf(CHAT_HASH_PREFIX) !== 0) {
+      return '';
+    }
+    const id = raw.slice(CHAT_HASH_PREFIX.length);
+    return /^\d+$/.test(id) ? id : '';
+  }
+
+  function setConversationHash(id) {
+    const nextHash = id ? CHAT_HASH_PREFIX + id : '';
+    const currentHash = (window.location.hash || '').replace(/^#/, '');
+    if (currentHash === nextHash) {
+      return;
+    }
+    try {
+      const url = new URL(window.location.href);
+      url.hash = nextHash;
+      window.history.replaceState(window.history.state, '', url);
+    } catch (e) {
+      window.location.hash = nextHash;
+    }
+  }
+
+  function restoreFromHash(root) {
+    const id = conversationIdFromHash();
+    if (!id) {
+      return;
+    }
+    if (id === root.getAttribute('data-conversation-id')) {
+      return;
+    }
+    Craft.sendActionRequest('GET', 'padstone-mason/chat/conversation', {
+      params: { conversationId: id }
+    }).then(function(response) {
+      applyConversation(root, response.data);
+    }).catch(function() {
+      setConversationHash('');
+    });
+  }
+
+  function maybeOpenSlideoutForHash() {
+    if (readReopenPayload() || document.querySelector('[data-assistant-root]')) {
+      return;
+    }
+    const id = conversationIdFromHash();
+    if (!id) {
+      return;
+    }
+    const button = document.querySelector('[data-padstone-mason]');
+    if (!button || typeof Craft.CpScreenSlideout === 'undefined') {
+      return;
+    }
+    openMasonSlideout({
+      entryId: button.getAttribute('data-entry-id'),
+      draftId: button.getAttribute('data-draft-id') || null,
+      siteId: button.getAttribute('data-site-id'),
+      conversationId: id
+    });
+  }
 
   function rootFrom(element) {
     return element.closest('[data-assistant-root]');
@@ -106,6 +168,7 @@
       if (!root) {
         return;
       }
+      restoreFromHash(root);
       syncEditorToBoundDraft(root, {
         conversationId: root.getAttribute('data-conversation-id') || '',
         entryId: root.getAttribute('data-entry-id') || '',
@@ -191,13 +254,25 @@
       entryId: button.getAttribute('data-entry-id') || payload.entryId,
       draftId: button.getAttribute('data-draft-id') || payload.draftId || null,
       siteId: button.getAttribute('data-site-id') || payload.siteId,
-      conversationId: payload.conversationId || null
+      conversationId: payload.conversationId || conversationIdFromHash() || null
     });
   }
 
-  function scheduleConsumeReopen() {
+  function scheduleChatRestore() {
     const start = function() {
       consumeReopen(0);
+      document.querySelectorAll('[data-assistant-root]').forEach(function(root) {
+        const fromHash = conversationIdFromHash();
+        if (fromHash) {
+          restoreFromHash(root);
+        } else {
+          const id = root.getAttribute('data-conversation-id');
+          if (id) {
+            setConversationHash(id);
+          }
+        }
+      });
+      maybeOpenSlideoutForHash();
     };
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', start);
@@ -317,6 +392,7 @@
     if (subjectWrap) {
       subjectWrap.hidden = !value;
     }
+    setConversationHash(value);
   }
 
   function clearAttachments(root) {
@@ -897,11 +973,18 @@
     openMasonSlideout({
       entryId: button.getAttribute('data-entry-id'),
       draftId: button.getAttribute('data-draft-id') || null,
-      siteId: button.getAttribute('data-site-id')
+      siteId: button.getAttribute('data-site-id'),
+      conversationId: conversationIdFromHash() || null
     });
   });
 
-  scheduleConsumeReopen();
+  scheduleChatRestore();
+
+  window.addEventListener('hashchange', function() {
+    document.querySelectorAll('[data-assistant-root]').forEach(function(root) {
+      restoreFromHash(root);
+    });
+  });
 
   function sendMessage(root) {
     const form = root.querySelector('[data-assistant-form]');
