@@ -28,4 +28,6 @@ ops craft migrate/up --plugin=padstone-mason
 ops craft padstone-mason/check
 ```
 
+Run migrations after every deploy that bumps `imarc/craft-padstone-mason`; missing columns (for example `titleCustom`) cause CP errors until migrate runs.
+
 Craft CLI in Ops projects: prefer `ops craft`, not bare `php craft`.

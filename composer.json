@@ -2,7 +2,7 @@
   "name": "imarc/craft-padstone-mason",
   "description": "Control-panel assistant for Padstone Content Designer.",
   "type": "craft-plugin",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "license": "MIT",
   "require": {
     "php": "^8.2",

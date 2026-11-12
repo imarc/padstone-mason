@@ -15,6 +15,7 @@ class Install extends Migration
             'draftId' => $this->integer(),
             'siteId' => $this->integer(),
             'title' => $this->string()->notNull()->defaultValue('New chat'),
+            'titleCustom' => $this->boolean()->notNull()->defaultValue(false),
             'dateCreated' => $this->dateTime()->notNull(),
             'dateUpdated' => $this->dateTime()->notNull(),
             'uid' => $this->uid(),

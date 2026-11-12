@@ -15,17 +15,18 @@ Sites that still use Spicy Web Neo for Content Designer should also install the 
    ```
 
 2. Install the plugin (`padstone-mason`).
-3. Put a key in the environment. It is read at request time and is not stored in settings, the database, or project config.
+3. After each upgrade, apply plugin migrations (`php craft migrate/up --plugin=padstone-mason`, or `ops craft` on Padstone/Ops hosts).
+4. Put a key in the environment. It is read at request time and is not stored in settings, the database, or project config.
 
    ```
    OPENAI_API_KEY=
    ANTHROPIC_API_KEY=
    ```
 
-4. In **Settings → Plugins → Padstone Mason**, choose the provider and model. Defaults are OpenAI and `gpt-4.1`. For Anthropic, set the model as well (for example `claude-sonnet-4-5`).
-5. List the section handles the assistant may create. The default is `pages`. An empty list blocks new pages and still allows edits to an existing entry.
-6. Choose the **Image upload volume** and optional folder path (default `mason`). Uploaded and URL-imported images land there. Users still need Craft permission to save assets in that volume.
-7. Grant **Padstone Mason → Use Ask Mason**. Admins already have it. Settings and the usage report stay admin-only.
+5. In **Settings → Plugins → Padstone Mason**, choose the provider and model. Defaults are OpenAI and `gpt-4.1`. For Anthropic, set the model as well (for example `claude-sonnet-4-5`).
+6. List the section handles the assistant may create. The default is `pages`. An empty list blocks new pages and still allows edits to an existing entry.
+7. Choose the **Image upload volume** and optional folder path (default `mason`). Uploaded and URL-imported images land there. Users still need Craft permission to save assets in that volume.
+8. Grant **Padstone Mason → Use Ask Mason**. Admins already have it. Settings and the usage report stay admin-only.
 
 Turn **Enabled** off to hide the assistant. The settings screen stays available.
 
