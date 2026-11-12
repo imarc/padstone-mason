@@ -4,14 +4,13 @@ Control-panel chat for entries the current user can save. It edits the fields on
 
 ## Neo Content Designer
 
-Sites that still use Spicy Web Neo for Content Designer should also install the companion package [`imarc/craft-padstone-mason-neo`](https://github.com/imarc/padstone-mason-neo) (Neo `^5.2`). Core Mason stays Matrix-only and does not require Neo. See that repository’s README for install order and top-level v1 limits.
+Sites that still use Spicy Web Neo for Content Designer should also install the companion package [`imarc/craft-padstone-mason-neo`](https://packagist.org/packages/imarc/craft-padstone-mason-neo) (Neo `^5.2`). Core Mason stays Matrix-only and does not require Neo. See that repository’s README for install order and top-level v1 limits.
 
 ## Setup
 
-1. Require it from the private repo [imarc/padstone-mason](https://github.com/imarc/padstone-mason). Composer needs access to that repo.
+1. Require it from [Packagist](https://packagist.org/packages/imarc/craft-padstone-mason).
 
    ```
-   composer config repositories.padstone-mason vcs https://github.com/imarc/padstone-mason.git
    composer require imarc/craft-padstone-mason:^0.1.0
    ```
 
