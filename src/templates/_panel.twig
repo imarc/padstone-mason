@@ -11,21 +11,6 @@
     {% if boundIsDraft %}data-bound-draft="1"{% endif %}
     {% if boundDraftId %}data-bound-draft-id="{{ boundDraftId }}"{% endif %}
 >
-    <div class="padstone-mason__bound" data-assistant-bound{% if not boundTitle %} data-empty="true"{% endif %}>
-        <span class="padstone-mason__bound-label">{% if boundTitle %}Bound page{% else %}No page bound{% endif %}</span>
-        {% if boundTitle %}
-            {% if editUrl %}
-                <a class="padstone-mason__bound-title" data-assistant-bound-title href="{{ editUrl }}">{{ boundTitle }}</a>
-            {% else %}
-                <span class="padstone-mason__bound-title" data-assistant-bound-title>{{ boundTitle }}</span>
-            {% endif %}
-            <span class="padstone-mason__bound-state" data-assistant-bound-state{% if not boundIsDraft %} hidden{% endif %}>Draft</span>
-        {% else %}
-            <span class="padstone-mason__bound-title" data-assistant-bound-title hidden></span>
-            <span class="padstone-mason__bound-state" data-assistant-bound-state hidden>Draft</span>
-        {% endif %}
-    </div>
-
     <div class="padstone-mason__layout">
         <aside class="padstone-mason__list" aria-label="Chats">
             <button type="button" class="btn" data-assistant-new>New chat</button>
@@ -39,14 +24,30 @@
         </aside>
 
         <div class="padstone-mason__chat">
-            <header class="padstone-mason__subject" data-assistant-subject-wrap{% if not conversation %} hidden{% endif %}>
-                <span class="padstone-mason__subject-line">
-                    <h2 class="padstone-mason__subject-title" data-assistant-subject>{{ conversation.title ?? 'New chat' }}</h2>
-                    <button type="button" class="btn small padstone-mason__subject-edit" data-assistant-edit-subject data-icon="edit" aria-label="Edit subject"></button>
-                    <button type="button" class="btn small padstone-mason__subject-delete" data-assistant-delete data-icon="trash" aria-label="Delete chat"{% if not conversation %} hidden{% endif %}></button>
-                </span>
-            </header>
-            <p class="padstone-mason__note">{{ draftNote }}</p>
+            <div class="padstone-mason__chat-intro">
+                <div class="padstone-mason__bound" data-assistant-bound{% if not boundTitle %} data-empty="true"{% endif %}>
+                    <span class="padstone-mason__bound-label">{% if boundTitle %}Bound page{% else %}No page bound{% endif %}</span>
+                    {% if boundTitle %}
+                        {% if editUrl %}
+                            <a class="padstone-mason__bound-title" data-assistant-bound-title href="{{ editUrl }}">{{ boundTitle }}</a>
+                        {% else %}
+                            <span class="padstone-mason__bound-title" data-assistant-bound-title>{{ boundTitle }}</span>
+                        {% endif %}
+                        <span class="padstone-mason__bound-state" data-assistant-bound-state{% if not boundIsDraft %} hidden{% endif %}>Draft</span>
+                    {% else %}
+                        <span class="padstone-mason__bound-title" data-assistant-bound-title hidden></span>
+                        <span class="padstone-mason__bound-state" data-assistant-bound-state hidden>Draft</span>
+                    {% endif %}
+                </div>
+                <header class="padstone-mason__subject" data-assistant-subject-wrap{% if not conversation %} hidden{% endif %}>
+                    <h2 class="padstone-mason__subject-line">
+                        <span data-assistant-subject>{{ conversation.title ?? 'New chat' }}</span>
+                        <button type="button" class="btn chromeless small padstone-mason__subject-edit" data-assistant-edit-subject data-icon="edit" aria-label="Edit subject"></button>
+                        <button type="button" class="btn chromeless small padstone-mason__subject-delete" data-assistant-delete data-icon="trash" aria-label="Delete chat"{% if not conversation %} hidden{% endif %}></button>
+                    </h2>
+                </header>
+                <p class="padstone-mason__note">{{ draftNote }}</p>
+            </div>
 
             <div class="padstone-mason__transcript" data-assistant-transcript>
                 {% for message in messages %}

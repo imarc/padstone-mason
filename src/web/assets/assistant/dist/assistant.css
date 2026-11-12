@@ -63,7 +63,6 @@ body.padstone-mason-screen #content.content-pane > h1 {
   display: flex;
   flex: 1 1 auto;
   flex-direction: column;
-  gap: 16px;
   min-height: 0;
 }
 
@@ -72,10 +71,12 @@ body.padstone-mason-screen #content.content-pane > h1 {
 }
 
 .padstone-mason__bound {
+  float: right;
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  max-width: min(100%, 22rem);
+  margin: 0 0 8px 12px;
+  max-width: min(22rem, 48vw);
   border: 1px solid #d5d8dc;
   border-radius: 4px;
   background: #f7f8f9;
@@ -83,18 +84,6 @@ body.padstone-mason-screen #content.content-pane > h1 {
   color: #3f4d5a;
   font-size: 12px;
   line-height: 1.3;
-}
-
-body.padstone-mason-screen .padstone-mason__bound {
-  position: absolute;
-  top: var(--padding, 24px);
-  right: var(--padding, 24px);
-  z-index: 2;
-}
-
-.slideout .padstone-mason__bound {
-  position: static;
-  align-self: flex-end;
 }
 
 .padstone-mason__bound[data-empty="true"] {
@@ -193,36 +182,59 @@ a.padstone-mason__bound-title:hover {
   min-height: 0;
 }
 
-.padstone-mason__subject {
+.padstone-mason__chat-intro {
   flex: none;
-  align-self: flex-start;
-  max-width: 100%;
+  display: flow-root;
+}
+
+.padstone-mason__subject {
+  box-sizing: border-box;
 }
 
 .padstone-mason__subject-line {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  max-width: 100%;
-  vertical-align: top;
-}
-
-.padstone-mason__subject-title {
-  flex: 0 1 auto;
-  min-width: 0;
   margin: 0;
-  overflow: hidden;
   font-size: 1.125rem;
   font-weight: 600;
   line-height: 1.35;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: break-word;
 }
 
-.padstone-mason__subject-edit,
+.padstone-mason__subject-line [data-assistant-subject] {
+  margin-inline-end: 0.5em;
+}
+
+.padstone-mason__subject-line .btn.chromeless.small {
+  display: inline-flex;
+  vertical-align: middle;
+  margin-inline: 0;
+  min-height: 0;
+  min-width: 0;
+  box-shadow: none;
+  padding: 0 !important;
+  padding-inline: 0 8px !important;
+  padding-block: 0 !important;
+  color: var(--gray-500, #8f98a3);
+}
+
+.padstone-mason__subject-line .btn.chromeless.small:not(.disabled):not(.inactive):hover,
+.padstone-mason__subject-line .btn.chromeless.small:not(.disabled):not(.inactive).hover {
+  background: transparent;
+  box-shadow: none;
+}
+
+.padstone-mason__subject-edit:not(.disabled):not(.inactive):hover,
+.padstone-mason__subject-edit:not(.disabled):not(.inactive).hover {
+  color: var(--link-color, #0b69a3);
+}
+
 .padstone-mason__subject-delete {
-  flex: none;
-  align-self: center;
+  color: var(--rose-500, #da2840);
+  margin-inline-start: -3px;
+}
+
+.padstone-mason__subject-delete:not(.disabled):not(.inactive):hover,
+.padstone-mason__subject-delete:not(.disabled):not(.inactive).hover {
+  color: var(--rose-600, #c2122c);
 }
 
 .padstone-mason__subject-modal {
@@ -562,6 +574,12 @@ body.padstone-mason__drawer-resizing .padstone-mason__drawer-panel iframe {
   .padstone-mason__list {
     flex: none;
     max-height: 180px;
+  }
+
+  .padstone-mason__bound {
+    float: none;
+    margin: 0 0 8px;
+    max-width: 100%;
   }
 
   .padstone-mason__drawer-panel {
